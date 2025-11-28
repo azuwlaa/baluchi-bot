@@ -1,6 +1,6 @@
 # bot.py
-import json
 import os
+import json
 import re
 from datetime import datetime
 from telegram import Update
@@ -15,9 +15,10 @@ from telegram.ext import (
 # ----------------------------
 # CONFIGURATION
 # ----------------------------
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"  # <-- Replace with your bot token
-GROUP_ID = -1001234567890                    # <-- Replace with your group ID
-ADMINS = [123456789, 987654321]             # <-- Replace with Telegram user IDs of admins
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token
+GROUP_ID = -1001234567890          # Replace with your group chat ID
+ADMINS = [123456789, 987654321]   # Replace with Telegram IDs of admins
+
 DATA_FILE = "orders.json"
 
 # ----------------------------
@@ -48,11 +49,11 @@ STATUS_MAP = {
 ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z ]+)$", re.IGNORECASE)
 
 # ----------------------------
-# GROUP LISTENER (DELIVERY AGENTS)
+# DELIVERY UPDATE HANDLER
 # ----------------------------
 async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat_id != GROUP_ID:
-        return  # Only process messages from the specific group
+        return
 
     text = update.message.text.strip()
     match = ORDER_PATTERN.match(text)
@@ -69,85 +70,25 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = load_data()
     agent_name = update.message.from_user.full_name
-    agent_id = update.message.from_user.id
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for order_id in order_list:
-        # Save history per order
         if order_id not in data:
-            data[order_id] = {"history": []}
-        data[order_id]["history"].append({
+            data[order_id] = []
+        data[order_id].append({
             "status": status,
-            "timestamp": timestamp,
-            "agent_name": agent_name,
-            "agent_id": agent_id
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "agent": agent_name,
         })
-        # Update latest status for convenience
-        data[order_id]["latest"] = {
-            "status": status,
-            "timestamp": timestamp,
-            "agent_name": agent_name
-        }
 
     save_data(data)
-
-    await update.message.reply_text(
-        f"✅ Updated {len(order_list)} order(s): {', '.join(order_list)}"
-    )
+    await update.message.reply_text(f"✅ Updated {len(order_list)} order(s): {', '.join(order_list)}")
 
 # ----------------------------
-# PRIVATE LOOKUP
+# ADMIN COMMANDS
 # ----------------------------
-async def private_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if not text.isdigit():
-        await update.message.reply_text("Send only the order number.")
-        return
-
-    data = load_data()
-    order_id = text
-    user_id = update.message.from_user.id
-
-    if order_id not in data:
-        await update.message.reply_text("No record found for this order.")
-        return
-
-    order_info = data[order_id]
-    # Check if admin
-    if user_id in ADMINS:
-        latest = order_info.get("latest", {})
-        await update.message.reply_text(
-            f"Order: {order_id}\n"
-            f"Status: {latest.get('status')}\n"
-            f"Updated: {latest.get('timestamp')}\n"
-            f"By: {latest.get('agent_name')}"
-        )
-    else:
-        # Check if this user has updated this order
-        user_updates = [h for h in order_info["history"] if h["agent_id"] == user_id]
-        if not user_updates:
-            await update.message.reply_text("You have not updated this order.")
-            return
-        latest = user_updates[-1]
-        await update.message.reply_text(
-            f"Order: {order_id}\n"
-            f"Your Status: {latest.get('status')}\n"
-            f"Updated: {latest.get('timestamp')}"
-        )
-
-# ----------------------------
-# COMMANDS
-# ----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send me an order number to get its status."
-    )
-
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in ADMINS:
-        await update.message.reply_text("❌ You are not authorized.")
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
         return
 
     data = load_data()
@@ -155,35 +96,67 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No orders yet.")
         return
 
+    # Show last 10 orders updates
+    all_orders = []
+    for order_id, updates in data.items():
+        for upd in updates:
+            all_orders.append((order_id, upd))
+    all_orders.sort(key=lambda x: x[1]["timestamp"], reverse=True)
+    last_10 = all_orders[:10]
+
     msg_lines = []
-    count = 0
-    for order_id, order_data in data.items():
-        latest = order_data.get("latest", {})
-        line = f"{order_id}: {latest.get('status')} by {latest.get('agent_name')} at {latest.get('timestamp')}"
-        msg_lines.append(line)
-        count += 1
-        if count >= 10:  # paginate every 10
-            break
+    for order_id, upd in last_10:
+        msg_lines.append(f"{order_id} - {upd['status']} by {upd['agent']} at {upd['timestamp']}")
 
     await update.message.reply_text("\n".join(msg_lines))
 
+# ----------------------------
+# DELIVERY AGENT COMMANDS
+# ----------------------------
 async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    agent_name = update.message.from_user.full_name
     data = load_data()
-    user_lines = []
 
-    for order_id, order_data in data.items():
-        user_updates = [h for h in order_data["history"] if h["agent_id"] == user_id]
-        if user_updates:
-            latest = user_updates[-1]
-            user_lines.append(
-                f"{order_id}: {latest['status']} at {latest['timestamp']}"
-            )
+    my_updates = []
+    for order_id, updates in data.items():
+        for upd in updates:
+            if upd['agent'] == agent_name:
+                my_updates.append((order_id, upd))
 
-    if not user_lines:
+    if not my_updates:
         await update.message.reply_text("You have not updated any orders yet.")
+        return
+
+    my_updates.sort(key=lambda x: x[1]["timestamp"], reverse=True)
+    msg_lines = []
+    for order_id, upd in my_updates[-10:]:
+        msg_lines.append(f"{order_id} - {upd['status']} at {upd['timestamp']}")
+
+    await update.message.reply_text("\n".join(msg_lines))
+
+# ----------------------------
+# PRIVATE LOOKUP
+# ----------------------------
+async def private_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("Send only the order number.")
+        return
+
+    data = load_data()
+    if text in data:
+        info = data[text][-1]  # last update
+        await update.message.reply_text(
+            f"Order: {text}\nStatus: {info['status']}\nUpdated: {info['timestamp']}\nBy: {info['agent']}"
+        )
     else:
-        await update.message.reply_text("\n".join(user_lines))
+        await update.message.reply_text("No record found for this order.")
+
+# ----------------------------
+# START COMMAND
+# ----------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send me an order number to get its status.")
 
 # ----------------------------
 # MAIN
@@ -191,11 +164,16 @@ async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT, group_listener))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, private_lookup))
-    app.add_handler(CommandHandler("start", start))
+    # Delivery updates in group
+    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
+
+    # Admin & agent commands in group
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("myorders", myorders))
+
+    # Private messages
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, private_lookup))
+    app.add_handler(CommandHandler("start", start))
 
     print("Bot running...")
     app.run_polling()
