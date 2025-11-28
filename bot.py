@@ -32,7 +32,7 @@ DATA_FILE = "orders.json"
 # ----------------------------
 STATUS_MAP = {
     "out": "Out for delivery",
-    "on the way": "On the way to city Hulhumale'",
+    "otw": "On the way to city Hulhumale'",
     "got": "Received by Hulhumale' agents",
     "done": "Order delivery completed",
     "no": "No answer from the number",
