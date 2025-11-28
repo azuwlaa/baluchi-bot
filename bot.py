@@ -1,9 +1,3 @@
-
----
-
-### `bot.py`
-
-```python
 import json
 import os
 import re
