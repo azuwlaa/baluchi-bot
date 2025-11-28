@@ -4,7 +4,8 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from telegram import Update, ChatAction, MessageEntity
+from telegram import Update, MessageEntity
+from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
