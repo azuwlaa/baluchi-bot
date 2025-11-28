@@ -2,8 +2,7 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from telegram import Update, ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -15,6 +14,15 @@ from telegram.ext import (
 # ----------------------------
 # CONFIG
 # ----------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("Please set the BOT_TOKEN environment variable")
+
+# The group where delivery agents will update orders
+GROUP_ID = -1001234567890  # <-- Replace with your group ID
+
+# Admin Telegram IDs
+ADMINS = [123456789, 987654321]  # <-- Replace with your admin IDs
 
 DATA_FILE = "orders.json"
 
@@ -29,7 +37,6 @@ STATUS_MAP = {
     "no": "No answer from the number",
 }
 
-# Only words in STATUS_MAP trigger updates
 STATUS_WORDS = STATUS_MAP.keys()
 
 ORDER_PATTERN = re.compile(
@@ -92,9 +99,10 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         f"✅ Updated {len(order_list)} order(s) by {agent_name}"
     )
-
-    # Delete confirmation after 5 seconds
-    await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+    # Optional: delete confirmation after 5 seconds if you want
+    # context.application.create_task(
+    #     context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id, timeout=5)
+    # )
 
 
 # ----------------------------
@@ -219,7 +227,7 @@ def main():
     # Lookup order in group or private
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
 
-    # Commands
+    # Commands work both in group and private
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", myorders))
     app.add_handler(CommandHandler("history", history))
