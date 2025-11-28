@@ -98,7 +98,7 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in data:
         info = data[text]
         await update.message.reply_text(
-            f"📦 Order: {text}\n"
+            f"Order#: {text}\n"
             f"Status: {info['status']}\n"
             f"Updated: {info['timestamp']} ⏰\n"
             f"By: {info['agent']}"
@@ -124,7 +124,7 @@ async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = f"📋 **Orders updated by {user_name}**\n"
     for oid, info in user_orders:
-        message += f"📦 {oid}: {info['status']} ⏰ {info['timestamp']}\n"
+        message += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']}\n"
 
     await update.message.reply_text(message)
 
@@ -143,7 +143,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = "**Order History:**\n"
     for oid, info in data.items():
-        message += f"📦 {oid}: {info['status']} ⏰ {info['timestamp']} by {info['agent']}\n"
+        message += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']} by {info['agent']}\n"
 
     await update.message.reply_text(message)
 
