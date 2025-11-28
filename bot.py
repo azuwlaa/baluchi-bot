@@ -2,7 +2,7 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -28,9 +28,7 @@ STATUS_MAP = {
     "no": "No answer from the number",
 }
 
-ORDER_PATTERN = re.compile(
-    r"^(?P<orders>[0-9 ,]+)\s+(?P<status>" + "|".join(STATUS_MAP.keys()) + r")$", re.IGNORECASE
-)
+ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re.IGNORECASE)
 
 # ----------------------------
 # Helper Functions
@@ -47,7 +45,6 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 def now_gmt5():
-    """Return current time in GMT+5 as timezone-aware datetime"""
     return datetime.now(timezone.utc) + timedelta(hours=5)
 
 # ----------------------------
@@ -55,7 +52,9 @@ def now_gmt5():
 # ----------------------------
 async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != GROUP_ID:
-        return  # Only accept updates from the specified group
+        return
+    if not update.message or not update.message.text:
+        return
 
     text = update.message.text.strip()
     match = ORDER_PATTERN.match(text)
@@ -64,8 +63,10 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     orders_raw = match.group("orders")
     status_key = match.group("status").lower().strip()
-    status_full = STATUS_MAP[status_key]
+    if status_key not in STATUS_MAP:
+        return
 
+    status_full = STATUS_MAP[status_key]
     order_list = [o.strip() for o in orders_raw.split(",") if o.strip().isdigit()]
     if not order_list:
         return
@@ -82,17 +83,23 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_data(data)
 
-    # Send confirmation that auto deletes after 5 seconds
     msg = await update.message.reply_text(f"✅ Updated {len(order_list)} order(s) by {agent_name}")
-    await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+    # Delete confirmation after 5 seconds
+    context.job_queue.run_once(
+        lambda ctx: ctx.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id),
+        5
+    )
 
 # ----------------------------
-# ORDER LOOKUP (PRIVATE or GROUP)
+# ORDER LOOKUP (PRIVATE OR GROUP)
 # ----------------------------
 async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     text = update.message.text.strip()
     if not text.isdigit():
-        return  # Ignore non-order-number messages
+        return
 
     data = load_data()
     if text in data:
@@ -108,18 +115,23 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /start
 # ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
     await update.message.reply_text("Send an order number to get its status.")
 
 # ----------------------------
 # /myorders
 # ----------------------------
 async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     user_name = update.message.from_user.full_name
     data = load_data()
     user_orders = [(oid, info) for oid, info in data.items() if info.get("agent") == user_name]
 
     if not user_orders:
-        await update.message.reply_text("❌ You haven't updated any orders yet.")
+        await update.message.reply_text("You haven't updated any orders yet.")
         return
 
     message = f"📋 **Orders updated by {user_name}**\n"
@@ -132,6 +144,9 @@ async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /history (admin only)
 # ----------------------------
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     if update.message.from_user.id not in ADMINS:
         await update.message.reply_text("❌ Only admins can view history.")
         return
@@ -151,6 +166,9 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /reset (admin only)
 # ----------------------------
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     if update.message.from_user.id not in ADMINS:
         await update.message.reply_text("❌ Only admins can reset orders.")
         return
@@ -162,6 +180,9 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /stats (admin only)
 # ----------------------------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     if update.message.from_user.id not in ADMINS:
         await update.message.reply_text("❌ Only admins can view stats.")
         return
@@ -205,13 +226,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Group order updates
+    # Add job queue to handle deletion
+    app.job_queue
+
+    # Handlers
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
-
-    # Order lookup in private or group
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
-
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", myorders))
     app.add_handler(CommandHandler("history", history))
