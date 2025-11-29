@@ -1,29 +1,23 @@
+import asyncio
 import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
 
-# ----------------------------
-# CONFIG
-# ----------------------------
-BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
-GROUP_ID = -1003463796946  # Replace with your Telegram group ID
-ADMINS = [624102836, 7477828866]  # Telegram IDs of admins
-AGENT_LOG_CHANNEL = -1003484693080  # Channel ID for agent logs
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import Command
+
+# ===========================
+# CONFIGURATION
+# ===========================
+BOT_TOKEN = ""
+GROUP_ID = -1003463796946
+ADMINS = [624102836, 7477828866]
+AGENT_LOG_CHANNEL = -1003484693080
+
 DATA_FILE = "orders.json"
 
-# ----------------------------
-# Status Mapping
-# ----------------------------
 STATUS_MAP = {
     "out": "Out for delivery",
     "otw": "On the way to city Hulhumale'",
@@ -32,314 +26,278 @@ STATUS_MAP = {
     "no": "No answer from the number",
 }
 
-ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re.IGNORECASE)
-
-# ----------------------------
-# Helper Functions
-# ----------------------------
+# ===========================
+# JSON STORAGE
+# ===========================
 def load_data():
-    try:
-        if not os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "w") as f:
-                json.dump({}, f)
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+    if not os.path.exists(DATA_FILE):
+        save_data({})
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
 
 def save_data(data):
-    try:
-        with open(DATA_FILE, "w") as f:
-            json.dump(data, f, indent=4)
-    except:
-        pass
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 def now_gmt5():
     return datetime.now(timezone.utc) + timedelta(hours=5)
 
-async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name, status_full):
-    orders_text = ", ".join(orders)
-    message = (
+# ===========================
+# BOT INITIALIZATION
+# ===========================
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# ===========================
+# HELPER – AGENT LOG
+# ===========================
+async def send_agent_log(orders, agent_name, status_full):
+    formatted = ", ".join(orders)
+    text = (
         f"#Update:\n"
-        f"• Orders#: {orders_text}\n"
+        f"• Orders#: {formatted}\n"
         f"• Agent: {agent_name}\n"
         f"• Time: {now_gmt5().strftime('%H:%M')} ⏰\n"
         f"• Status: {status_full}"
     )
-    await context.bot.send_message(chat_id=AGENT_LOG_CHANNEL, text=message)
+    await bot.send_message(AGENT_LOG_CHANNEL, text)
 
-async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message: str):
-    for admin_id in ADMINS:
+async def notify_admins(orders, agent_name):
+    text = f"⚠️ Order(s) {', '.join(orders)} marked as NO ANSWER by {agent_name}"
+    for admin in ADMINS:
         try:
-            await context.bot.send_message(chat_id=admin_id, text=message)
+            await bot.send_message(admin, text)
         except:
             pass
 
-# ----------------------------
-# DELETE MESSAGE JOB
-# ----------------------------
-async def delete_message_callback(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await context.bot.delete_message(chat_id=context.job.chat_id, message_id=context.job.data)
-    except:
-        pass
+# ===========================
+# /start
+# ===========================
+@dp.message(Command("start"))
+async def cmd_start(msg: Message):
+    await msg.answer("Send an order number to get its status.")
 
-# ----------------------------
+# ===========================
+# ORDER LOOKUP (send number)
+# ===========================
+@dp.message(F.text.regexp(r"^\d+$"))
+async def lookup(msg: Message):
+    oid = msg.text.strip()
+    data = load_data()
+
+    if oid in data:
+        info = data[oid]
+        await msg.answer(
+            f"Order#: {oid}\n"
+            f"Status: {info['status']}\n"
+            f"Updated: {info['timestamp']} ⏰\n"
+            f"By: {info['agent']}"
+        )
+
+# ===========================
 # GROUP LISTENER
-# ----------------------------
-async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != GROUP_ID:
-        return
-    if not update.message or not update.message.text:
+# ===========================
+ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$")
+
+@dp.message(F.chat.id == GROUP_ID)
+async def group_listener(msg: Message):
+    if not msg.text:
         return
 
-    text = update.message.text.strip()
-    match = ORDER_PATTERN.match(text)
+    match = ORDER_PATTERN.match(msg.text.strip())
     if not match:
         return
 
     orders_raw = match.group("orders")
     status_key = match.group("status").lower().strip()
+
     if status_key not in STATUS_MAP:
         return
 
     status_full = STATUS_MAP[status_key]
-    order_list = [o.strip() for o in orders_raw.split(",") if o.strip().isdigit()]
-    if not order_list:
+    orders = [o.strip() for o in orders_raw.split(",") if o.strip().isdigit()]
+
+    if not orders:
         return
 
     data = load_data()
-    agent_name = update.message.from_user.full_name
-    updated_orders = []
+    agent_name = msg.from_user.full_name
+    updated = []
 
-    for order_id in order_list:
-        prev_status = data.get(order_id, {}).get("status", "")
-        data[order_id] = {
+    for oid in orders:
+        prev_status = data.get(oid, {}).get("status", "")
+        data[oid] = {
             "status": status_full,
             "timestamp": now_gmt5().strftime("%H:%M"),
             "agent": agent_name,
             "prev_status": prev_status,
         }
-        updated_orders.append(order_id)
+        updated.append(oid)
 
     save_data(data)
 
-    # Notify admins if any order is "no"
+    # Notify admins (NO ANSWER)
     if status_key == "no":
-        await notify_admins(context, f"⚠️ Order(s) {', '.join(updated_orders)} marked as NO ANSWER by {agent_name}")
+        await notify_admins(updated, agent_name)
 
-    # Confirmation message + delete after 5 seconds
-    msg = await update.message.reply_text(f"✅ Updated {len(updated_orders)} order(s) by {agent_name}")
-    context.job_queue.run_once(delete_message_callback, 5, data=msg.message_id, chat_id=msg.chat_id)
+    # Confirmation
+    confirm = await msg.answer(f"✅ Updated {len(updated)} order(s) by {agent_name}")
 
-    # Send agent log
-    await send_agent_log(context, updated_orders, agent_name, status_full)
-
-# ----------------------------
-# ORDER LOOKUP WITH INLINE BUTTONS
-# ----------------------------
-async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-    text = update.message.text.strip()
-    if not text.isdigit():
-        return
-
-    data = load_data()
-    order_info = data.get(text, {"status": "Not updated yet", "agent": "N/A", "timestamp": "N/A"})
-    msg_text = (
-        f"Order#: {text}\n"
-        f"Status: {order_info['status']}\n"
-        f"Updated: {order_info['timestamp']} ⏰\n"
-        f"By: {order_info['agent']}"
-    )
-
-    # Create buttons for each status
-    keyboard = [
-        [InlineKeyboardButton(name, callback_data=f"{text}|{key}")]
-        for key, name in STATUS_MAP.items()
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(msg_text, reply_markup=reply_markup)
-
-# ----------------------------
-# INLINE BUTTON CALLBACK
-# ----------------------------
-async def status_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-    data = load_data()
-
+    # Delete after 5 seconds
+    await asyncio.sleep(5)
     try:
-        order_id, status_key = query.data.split("|")
+        await confirm.delete()
     except:
-        return
+        pass
 
-    if status_key not in STATUS_MAP:
-        return
+    # Agent log
+    await send_agent_log(updated, agent_name, status_full)
 
-    status_full = STATUS_MAP[status_key]
-    agent_name = query.from_user.full_name
-    prev_status = data.get(order_id, {}).get("status", "")
-
-    data[order_id] = {
-        "status": status_full,
-        "timestamp": now_gmt5().strftime("%H:%M"),
-        "agent": agent_name,
-        "prev_status": prev_status,
-    }
-    save_data(data)
-
-    await query.edit_message_text(f"✅ Order# {order_id} updated to '{status_full}' by {agent_name}")
-    await send_agent_log(context, [order_id], agent_name, status_full)
-
-    if status_key == "no":
-        await notify_admins(context, f"⚠️ Order# {order_id} marked as NO ANSWER by {agent_name}")
-
-# ----------------------------
-# COMMANDS
-# ----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    await update.message.reply_text("Send an order number to get its status.")
-
-async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    user_name = update.message.from_user.full_name
+# ===========================
+# /myorders
+# ===========================
+@dp.message(Command("myorders"))
+async def myorders(msg: Message):
+    user = msg.from_user.full_name
     data = load_data()
-    user_orders = [(oid, info) for oid, info in data.items() if info.get("agent") == user_name]
-    if not user_orders:
-        await update.message.reply_text("You haven't updated any orders yet.")
-        return
-    message = f"📋 Orders updated by {user_name}\n"
-    for oid, info in user_orders:
-        message += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']}\n"
-    await update.message.reply_text(message)
 
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    if update.message.from_user.id not in ADMINS:
-        await update.message.reply_text("❌ Only admins can view history.")
-        return
+    orders = [(oid, info) for oid, info in data.items() if info["agent"] == user]
+
+    if not orders:
+        return await msg.answer("You haven't updated any orders yet.")
+
+    text = f"📋 Orders updated by {user}\n"
+    for oid, info in orders:
+        text += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']}\n"
+
+    await msg.answer(text)
+
+# ===========================
+# /history (admins only)
+# ===========================
+@dp.message(Command("history"))
+async def history(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return await msg.answer("❌ Only admins can view history.")
+
     data = load_data()
     if not data:
-        await update.message.reply_text("No orders recorded yet.")
-        return
-    message = "**Order History:**\n"
+        return await msg.answer("No orders recorded yet.")
+
+    text = "📜 **Order History:**\n"
     for oid, info in data.items():
-        message += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']} by {info['agent']}\n"
-    await update.message.reply_text(message)
+        text += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']} by {info['agent']}\n"
 
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    if update.message.from_user.id not in ADMINS:
-        await update.message.reply_text("❌ Only admins can reset orders.")
-        return
-    save_data({})
-    await update.message.reply_text("✅ All order history has been cleared.")
+    await msg.answer(text)
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    if update.message.from_user.id not in ADMINS:
-        await update.message.reply_text("❌ Only admins can view stats.")
-        return
+# ===========================
+# /stats (admins only)
+# ===========================
+@dp.message(Command("stats"))
+async def stats(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return await msg.answer("❌ Admin only command.")
+
     data = load_data()
-    total = done_count = in_progress = no_answer = 0
+
+    total = in_progress = done_count = no_answer = 0
     agent_stats = {}
+
     for oid, info in data.items():
+        agent = info["agent"]
         status = info["status"].lower()
-        agent = info.get("agent", "Unknown")
-        if agent not in agent_stats:
-            agent_stats[agent] = {"total": 0, "done": 0}
+
+        agent_stats.setdefault(agent, {"total": 0, "done": 0})
         agent_stats[agent]["total"] += 1
+        total += 1
+
         if "completed" in status:
-            done_count += 1
             agent_stats[agent]["done"] += 1
+            done_count += 1
         elif "no answer" in status:
             no_answer += 1
         else:
             in_progress += 1
-        total += 1
-    message = (
+
+    text = (
         f"📊 Today's Order Stats\n"
-        f"Total orders updated: {total}\n"
+        f"Total: {total}\n"
         f"✅ Completed: {done_count}\n"
         f"🚚 In progress: {in_progress}\n"
         f"❌ No answer: {no_answer}\n\n"
         f"🧑‍🤝‍🧑 Per-Agent Stats\n"
     )
-    for agent, stats_info in agent_stats.items():
-        message += f"{agent}: {stats_info['total']} updated, ✅ {stats_info['done']} done\n"
-    await update.message.reply_text(message)
 
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
+    for agent, st in agent_stats.items():
+        text += f"{agent}: {st['total']} updated, {st['done']} done\n"
+
+    await msg.answer(text)
+
+# ===========================
+# /reset (admins)
+# ===========================
+@dp.message(Command("reset"))
+async def reset_db(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return await msg.answer("❌ Admin only command.")
+
+    save_data({})
+    await msg.answer("✅ All order history cleared.")
+
+# ===========================
+# /undone order#
+# ===========================
+@dp.message(Command("undone"))
+async def undone(msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return await msg.answer("❌ Admin only command.")
+
+    args = msg.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await msg.answer("Usage: /undone 12345")
+
+    target = args[1]
     data = load_data()
-    agent_name = update.message.from_user.full_name
-    updated_orders = []
-    for order_id, info in data.items():
-        if info["status"].lower() != "no":
-            data[order_id]["status"] = STATUS_MAP["done"]
-            data[order_id]["timestamp"] = now_gmt5().strftime("%H:%M")
-            data[order_id]["agent"] = agent_name
-            updated_orders.append(order_id)
-    save_data(data)
-    if updated_orders:
-        msg = await update.message.reply_text(f"✅ Marked {len(updated_orders)} order(s) as done by {agent_name}")
-        context.job_queue.run_once(delete_message_callback, 5, data=msg.message_id, chat_id=msg.chat_id)
-        await send_agent_log(context, updated_orders, agent_name, STATUS_MAP["done"])
-    else:
-        await update.message.reply_text("No orders eligible to mark as done.")
 
-async def undone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or update.message.from_user.id not in ADMINS:
-        return
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /undone <order#>")
-        return
-    order_id = args[0]
+    if target not in data:
+        return await msg.answer("Order not found.")
+
+    old = data[target]["prev_status"] or "Pending"
+    data[target]["status"] = old
+    save_data(data)
+
+    await msg.answer(f"🔄 Order {target} reverted to previous status: {old}")
+
+# ===========================
+# /done (mark everything done)
+# ===========================
+@dp.message(Command("done"))
+async def mark_all_done(msg: Message):
+    agent = msg.from_user.full_name
     data = load_data()
-    if order_id not in data:
-        await update.message.reply_text(f"Order# {order_id} not found.")
-        return
-    prev_status = data[order_id].get("prev_status", "In Progress")
-    data[order_id]["status"] = prev_status
-    data[order_id]["timestamp"] = now_gmt5().strftime("%H:%M")
+    updated = []
+
+    for oid, info in data.items():
+        if "no answer" not in info["status"].lower():
+            data[oid]["status"] = STATUS_MAP["done"]
+            data[oid]["timestamp"] = now_gmt5().strftime("%H:%M")
+            data[oid]["agent"] = agent
+            updated.append(oid)
+
     save_data(data)
-    await update.message.reply_text(f"✅ Order# {order_id} reverted to previous status: {prev_status}")
 
-# ----------------------------
-# MAIN
-# ----------------------------
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.job_queue  # initialize job queue
+    if not updated:
+        return await msg.answer("No orders eligible to mark as done.")
 
-    # Handlers
-    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
-    app.add_handler(CallbackQueryHandler(status_button_callback))
+    await msg.answer(f"✅ Marked {len(updated)} order(s) as completed.")
+    await send_agent_log(updated, agent, STATUS_MAP["done"])
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("myorders", myorders))
-    app.add_handler(CommandHandler("history", history))
-    app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("done", done_command))
-    app.add_handler(CommandHandler("undone", undone_command))
-
-    print("Bot is running...")
-    app.run_polling()
+# ===========================
+# MAIN LOOP
+# ===========================
+async def main():
+    print("Bot running on Aiogram (Python 3.13 compatible)...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
