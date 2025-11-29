@@ -72,6 +72,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
 # MESSAGE HANDLERS
 # ----------------------------
 async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
     if not update.message.text.isdigit():
         return
     data = load_data()
@@ -83,6 +84,12 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Status: {info['status']}\n"
             f"Updated: {info['timestamp']} ⏰\n"
             f"By: {info['agent']}"
+        )
+    else:
+        # Private message if order hasn't been updated yet
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ This order hasn't been updated yet!"
         )
 
 async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,11 +106,27 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         orders = [o.strip() for o in match_done.group(1).split(",") if o.strip().isdigit()]
         if not orders: return
         data = load_data()
+
+        # Separate existing vs non-existing orders
+        existing_orders, non_existing_orders = [], []
+        for oid in orders:
+            if oid in data:
+                existing_orders.append(oid)
+            else:
+                non_existing_orders.append(oid)
+
+        if non_existing_orders:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
+            )
+
+        orders = existing_orders
+        if not orders: return
+
         updated = []
         for oid in orders:
-            current_order = data.get(oid, {})
-            if current_order.get("status") == STATUS_MAP["done"]:
-                continue
+            current_order = data[oid]
             current_order["status"] = STATUS_MAP["done"]
             current_order["timestamp"] = now_gmt5().strftime("%H:%M")
             current_order["agent"] = agent_name
@@ -131,10 +154,27 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_full = STATUS_MAP[status_key]
     orders = [o.strip() for o in orders_raw.split(",") if o.strip().isdigit()]
     if not orders: return
+
     data = load_data()
+    existing_orders, non_existing_orders = [], []
+    for oid in orders:
+        if oid in data:
+            existing_orders.append(oid)
+        else:
+            non_existing_orders.append(oid)
+
+    if non_existing_orders:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
+        )
+
+    orders = existing_orders
+    if not orders: return
+
     updated = []
     for oid in orders:
-        current_order = data.get(oid, {})
+        current_order = data[oid]
         if current_order.get("status") == STATUS_MAP["done"]:
             continue
         current_order["status"] = status_full
@@ -187,7 +227,7 @@ async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = args[1]
     data = load_data()
     if order_id not in data:
-        return await update.message.reply_text("Order not found.")
+        return await update.message.reply_text("❌ This order hasn't been updated yet!")
     history = data[order_id].get("history", [])
     last_non_done = None
     for entry in reversed(history):
@@ -213,14 +253,12 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     updated = []
 
     for oid, info in data.items():
-        # Skip if done, no, or not touched by this agent
         if info.get("status") == STATUS_MAP["done"]:
             continue
         if info.get("status") == STATUS_MAP["no"]:
             continue
         if info.get("agent") != agent:
             continue
-        # Mark done
         info["status"] = STATUS_MAP["done"]
         info["timestamp"] = now_gmt5().strftime("%H:%M")
         info.setdefault("history", []).append({
