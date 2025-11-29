@@ -7,6 +7,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -14,11 +15,10 @@ from telegram.ext import (
 # ----------------------------
 # CONFIG
 # ----------------------------
-BOT_TOKEN = ""
+BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
 GROUP_ID = -1003463796946  # Replace with your Telegram group ID
-ADMINS = [624102836, 7477828866]  # Replace with Telegram IDs of admins
-AGENT_LOG_CHANNEL = -1003484693080  # Replace with a channel ID for agent logs
-
+ADMINS = [624102836, 7477828866]  # Telegram IDs of admins
+AGENT_LOG_CHANNEL = -1003484693080  # Channel ID for agent logs
 DATA_FILE = "orders.json"
 
 # ----------------------------
@@ -38,21 +38,26 @@ ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re
 # Helper Functions
 # ----------------------------
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "w") as f:
-            json.dump({}, f)
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
+    try:
+        if not os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "w") as f:
+                json.dump({}, f)
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
 def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except:
+        pass
 
 def now_gmt5():
     return datetime.now(timezone.utc) + timedelta(hours=5)
 
 async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name, status_full):
-    """Send consolidated log message to agent log channel"""
     orders_text = ", ".join(orders)
     message = (
         f"#Update:\n"
@@ -64,12 +69,20 @@ async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name,
     await context.bot.send_message(chat_id=AGENT_LOG_CHANNEL, text=message)
 
 async def notify_admins(context: ContextTypes.DEFAULT_TYPE, message: str):
-    """Send a notification to all admins"""
     for admin_id in ADMINS:
         try:
             await context.bot.send_message(chat_id=admin_id, text=message)
         except:
             pass
+
+# ----------------------------
+# DELETE MESSAGE JOB
+# ----------------------------
+async def delete_message_callback(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await context.bot.delete_message(chat_id=context.job.chat_id, message_id=context.job.data)
+    except:
+        pass
 
 # ----------------------------
 # GROUP LISTENER
@@ -112,22 +125,18 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(data)
 
     # Notify admins if any order is "no"
-    no_answer_orders = [o for o in updated_orders if status_key == "no"]
-    if no_answer_orders:
-        await notify_admins(context, f"⚠️ Order(s) {', '.join(no_answer_orders)} marked as NO ANSWER by {agent_name}")
+    if status_key == "no":
+        await notify_admins(context, f"⚠️ Order(s) {', '.join(updated_orders)} marked as NO ANSWER by {agent_name}")
 
-    # Send confirmation and delete after 5 sec
+    # Confirmation message + delete after 5 seconds
     msg = await update.message.reply_text(f"✅ Updated {len(updated_orders)} order(s) by {agent_name}")
-    context.job_queue.run_once(
-        lambda ctx: ctx.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id),
-        5
-    )
+    context.job_queue.run_once(delete_message_callback, 5, data=msg.message_id, chat_id=msg.chat_id)
 
     # Send agent log
     await send_agent_log(context, updated_orders, agent_name, status_full)
 
 # ----------------------------
-# ORDER LOOKUP
+# ORDER LOOKUP WITH INLINE BUTTONS
 # ----------------------------
 async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -135,15 +144,60 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text.isdigit():
         return
+
     data = load_data()
-    if text in data:
-        info = data[text]
-        await update.message.reply_text(
-            f"Order#: {text}\n"
-            f"Status: {info['status']}\n"
-            f"Updated: {info['timestamp']} ⏰\n"
-            f"By: {info['agent']}"
-        )
+    order_info = data.get(text, {"status": "Not updated yet", "agent": "N/A", "timestamp": "N/A"})
+    msg_text = (
+        f"Order#: {text}\n"
+        f"Status: {order_info['status']}\n"
+        f"Updated: {order_info['timestamp']} ⏰\n"
+        f"By: {order_info['agent']}"
+    )
+
+    # Create buttons for each status
+    keyboard = [
+        [InlineKeyboardButton(name, callback_data=f"{text}|{key}")]
+        for key, name in STATUS_MAP.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(msg_text, reply_markup=reply_markup)
+
+# ----------------------------
+# INLINE BUTTON CALLBACK
+# ----------------------------
+async def status_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = load_data()
+
+    try:
+        order_id, status_key = query.data.split("|")
+    except:
+        return
+
+    if status_key not in STATUS_MAP:
+        return
+
+    status_full = STATUS_MAP[status_key]
+    agent_name = query.from_user.full_name
+    prev_status = data.get(order_id, {}).get("status", "")
+
+    data[order_id] = {
+        "status": status_full,
+        "timestamp": now_gmt5().strftime("%H:%M"),
+        "agent": agent_name,
+        "prev_status": prev_status,
+    }
+    save_data(data)
+
+    await query.edit_message_text(f"✅ Order# {order_id} updated to '{status_full}' by {agent_name}")
+    await send_agent_log(context, [order_id], agent_name, status_full)
+
+    if status_key == "no":
+        await notify_admins(context, f"⚠️ Order# {order_id} marked as NO ANSWER by {agent_name}")
 
 # ----------------------------
 # COMMANDS
@@ -241,13 +295,28 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(data)
     if updated_orders:
         msg = await update.message.reply_text(f"✅ Marked {len(updated_orders)} order(s) as done by {agent_name}")
-        context.job_queue.run_once(
-            lambda ctx: ctx.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id),
-            5
-        )
+        context.job_queue.run_once(delete_message_callback, 5, data=msg.message_id, chat_id=msg.chat_id)
         await send_agent_log(context, updated_orders, agent_name, STATUS_MAP["done"])
     else:
         await update.message.reply_text("No orders eligible to mark as done.")
+
+async def undone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.message.from_user.id not in ADMINS:
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /undone <order#>")
+        return
+    order_id = args[0]
+    data = load_data()
+    if order_id not in data:
+        await update.message.reply_text(f"Order# {order_id} not found.")
+        return
+    prev_status = data[order_id].get("prev_status", "In Progress")
+    data[order_id]["status"] = prev_status
+    data[order_id]["timestamp"] = now_gmt5().strftime("%H:%M")
+    save_data(data)
+    await update.message.reply_text(f"✅ Order# {order_id} reverted to previous status: {prev_status}")
 
 # ----------------------------
 # MAIN
@@ -259,12 +328,15 @@ def main():
     # Handlers
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
+    app.add_handler(CallbackQueryHandler(status_button_callback))
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", myorders))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("done", done_command))  # new /done command
+    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("undone", undone_command))
 
     print("Bot is running...")
     app.run_polling()
