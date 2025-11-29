@@ -58,14 +58,20 @@ async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name,
     """
     orders_text = ", ".join(orders)
     agent_md = f"[{escape_md(agent_name)}](tg://user?id={user_id})" if user_id else escape_md(agent_name)
+    action_md = escape_md(action)
+
     message = (
-        f"#{action}:\n"
-        f"• Orders#: {orders_text}\n"
+        f"\\#{action_md}:\n"
+        f"• Orders#: {escape_md(orders_text)}\n"
         f"• Agent: {agent_md}\n"
-        f"• Time: {now_gmt5().strftime('%H:%M')} ⏰\n"
-        f"• Status: {status_full}"
+        f"• Time: {escape_md(now_gmt5().strftime('%H:%M'))} ⏰\n"
+        f"• Status: {escape_md(status_full)}"
     )
-    await context.bot.send_message(chat_id=AGENT_LOG_CHANNEL, text=message, parse_mode="MarkdownV2")
+    await context.bot.send_message(
+        chat_id=AGENT_LOG_CHANNEL,
+        text=message,
+        parse_mode="MarkdownV2"
+    )
 
 async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
     msg = f"⚠️ Order(s) {', '.join(orders)} marked as NO ANSWER by {agent_name}"
