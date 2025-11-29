@@ -10,11 +10,11 @@ import asyncio
 # CONFIG
 # ----------------------------
 BOT_TOKEN = ""  # Your bot token
-CONFIG_FILE = "config.json"
 DATA_FILE = "orders.json"
 
 ADMINS = [624102836, 7477828866]
 AGENT_LOG_CHANNEL = -1003484693080
+GROUP_ID = -1003463796946  # static main group
 
 STATUS_MAP = {
     "out": "Out for delivery",
@@ -25,22 +25,6 @@ STATUS_MAP = {
 }
 
 ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re.IGNORECASE)
-
-# ----------------------------
-# CONFIG FILE HANDLING
-# ----------------------------
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        save_config({"GROUP_ID": -1003463796946})
-    with open(CONFIG_FILE, "r") as f:
-        return json.load(f)
-
-def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
-
-config = load_config()
-GROUP_ID = config.get("GROUP_ID", -1003463796946)
 
 # ----------------------------
 # JSON STORAGE
@@ -91,26 +75,20 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
 async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-
     user_id = update.message.from_user.id
     text = update.message.text.strip()
-
     if not text.isdigit():
         return
-
     data = load_data()
-    oid = text
-
-    if oid in data:
-        info = data[oid]
+    if text in data:
+        info = data[text]
         await update.message.reply_text(
-            f"Order#: {oid}\n"
+            f"Order#: {text}\n"
             f"Status: {info['status']}\n"
             f"Updated: {info['timestamp']} ⏰\n"
             f"By: {info['agent']}"
         )
     else:
-        # Only send private message if order does not exist
         await context.bot.send_message(
             chat_id=user_id,
             text="❌ This order hasn't been updated yet!"
@@ -133,39 +111,35 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not orders: return
         data = load_data()
         updated = []
-        non_existing_orders = []
+        non_existing = []
 
         for oid in orders:
             if oid not in data:
-                non_existing_orders.append(oid)
+                non_existing.append(oid)
                 continue
-            current_order = data[oid]
-
-            if current_order.get("status") == STATUS_MAP["done"]:
-                completed_by = current_order.get("agent", "Unknown")
+            order = data[oid]
+            if order.get("status") == STATUS_MAP["done"]:
+                completed_by = order.get("agent", "Unknown")
                 await update.message.reply_text(
                     f"⚠️ Order {oid} has already been delivered by {completed_by}!"
                 )
                 continue
-
-            current_order["status"] = STATUS_MAP["done"]
-            current_order["timestamp"] = now_gmt5().strftime("%H:%M")
-            current_order["agent"] = agent_name
-            current_order.setdefault("history", []).append({
+            order["status"] = STATUS_MAP["done"]
+            order["timestamp"] = now_gmt5().strftime("%H:%M")
+            order["agent"] = agent_name
+            order.setdefault("history", []).append({
                 "status": STATUS_MAP["done"],
                 "agent": agent_name,
-                "timestamp": current_order["timestamp"]
+                "timestamp": order["timestamp"]
             })
-            data[oid] = current_order
+            data[oid] = order
             updated.append(oid)
 
         save_data(data)
-
-        if non_existing_orders:
+        if non_existing:
             await update.message.reply_text(
-                f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
+                f"❌ These orders haven't been updated yet: {', '.join(non_existing)}"
             )
-
         if updated:
             await update.message.reply_text(
                 f"✅ Orders {', '.join(updated)} marked as done manually by {agent_name}"
@@ -187,26 +161,22 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     updated = []
 
     for oid in orders:
-        current_order = data.get(oid, {"status": "", "timestamp": "", "agent": "", "history": []})
-
-        # Skip done orders and alert who completed it
-        if current_order.get("status") == STATUS_MAP["done"]:
-            completed_by = current_order.get("agent", "Unknown")
+        order = data.get(oid, {"status": "", "timestamp": "", "agent": "", "history": []})
+        if order.get("status") == STATUS_MAP["done"]:
+            completed_by = order.get("agent", "Unknown")
             await update.message.reply_text(
                 f"⚠️ Order {oid} has already been delivered by {completed_by}!"
             )
             continue
-
-        # Update or create
-        current_order["status"] = status_full
-        current_order["timestamp"] = now_gmt5().strftime("%H:%M")
-        current_order["agent"] = agent_name
-        current_order.setdefault("history", []).append({
+        order["status"] = status_full
+        order["timestamp"] = now_gmt5().strftime("%H:%M")
+        order["agent"] = agent_name
+        order.setdefault("history", []).append({
             "status": status_full,
             "agent": agent_name,
-            "timestamp": current_order["timestamp"]
+            "timestamp": order["timestamp"]
         })
-        data[oid] = current_order
+        data[oid] = order
         updated.append(oid)
 
     save_data(data)
@@ -224,8 +194,30 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 # COMMAND HANDLERS
 # ----------------------------
-# start, myorders, reset, undone, done_command, completed_orders, ongoing_orders, stats, mystats
-# (same as previous versions; no /setgroup)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Welcome! Send an order number to check status.")
+
+async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.message.from_user.full_name
+    data = load_data()
+    user_orders = [(oid, info) for oid, info in data.items() if info.get("agent") == user_name]
+    if not user_orders:
+        await update.message.reply_text("You haven't updated any orders yet.")
+        return
+    message = f"📋 Orders updated by {user_name}\n"
+    for oid, info in user_orders:
+        message += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']}\n"
+    await update.message.reply_text(message)
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("❌ Only admins can reset orders.")
+        return
+    save_data({})
+    await update.message.reply_text("✅ All order history has been cleared.")
+
+# Placeholder for other commands: /done, /undone, /comp, /status, /stats, /mystats
+# Implement them following the previous versions you had.
 
 # ----------------------------
 # MAIN
@@ -237,12 +229,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", myorders))
     app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(CommandHandler("undone", undone))
-    app.add_handler(CommandHandler("done", done_command))
-    app.add_handler(CommandHandler("comp", completed_orders))
-    app.add_handler(CommandHandler("status", ongoing_orders))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("mystats", mystats))
+    # Add other command handlers here...
 
     # Messages
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
