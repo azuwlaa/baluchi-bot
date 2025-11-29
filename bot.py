@@ -86,7 +86,6 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"By: {info['agent']}"
         )
     else:
-        # Private message if order hasn't been updated yet
         await context.bot.send_message(
             chat_id=user_id,
             text="❌ This order hasn't been updated yet!"
@@ -126,7 +125,10 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for oid in orders:
             current_order = data[oid]
             if current_order.get("status") == STATUS_MAP["done"]:
-                await update.message.reply_text(f"⚠️ Order {oid} has already been delivered!")
+                completed_by = current_order.get("agent", "Unknown")
+                await update.message.reply_text(
+                    f"⚠️ Order {oid} has already been delivered by {completed_by}!"
+                )
                 continue
             current_order["status"] = STATUS_MAP["done"]
             current_order["timestamp"] = now_gmt5().strftime("%H:%M")
@@ -175,9 +177,13 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for oid in orders:
         current_order = data[oid]
 
+        # Skip done orders and alert who completed it
         if current_order.get("status") == STATUS_MAP["done"]:
-            await update.message.reply_text(f"⚠️ Order {oid} has already been delivered!")
-            continue  # Skip updating done orders
+            completed_by = current_order.get("agent", "Unknown")
+            await update.message.reply_text(
+                f"⚠️ Order {oid} has already been delivered by {completed_by}!"
+            )
+            continue
 
         current_order["status"] = status_full
         current_order["timestamp"] = now_gmt5().strftime("%H:%M")
@@ -190,11 +196,13 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(data)
     if status_key == "no":
         await notify_admins(context, updated, agent_name)
-    msg = await update.message.reply_text(f"✅ Updated {len(updated)} order(s) by {agent_name}")
-    await asyncio.sleep(5)
-    try: await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
-    except: pass
-    if updated:
+    if updated:  # Only send message if any orders updated
+        msg = await update.message.reply_text(f"✅ Updated {len(updated)} order(s) by {agent_name}")
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+        except:
+            pass
         await send_agent_log(context, updated, agent_name, status_full, action="Update", user_id=user_id)
 
 # ----------------------------
@@ -273,9 +281,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(data)
 
     if not updated:
-        return await update.message.reply_text(
-            "No eligible orders to mark as done. Only your own orders in progress can be done."
-        )
+        return  # Do not reply if no orders updated
 
     msg = await update.message.reply_text(
         f"✅ Marked {len(updated)} order(s) as done by {agent}"
