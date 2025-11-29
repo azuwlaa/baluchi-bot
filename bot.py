@@ -1,10 +1,10 @@
 import json
 import os
 import re
-import asyncio
 from datetime import datetime, timedelta, timezone
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import asyncio
 
 # ----------------------------
 # CONFIG
@@ -24,7 +24,6 @@ STATUS_MAP = {
 }
 
 ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re.IGNORECASE)
-ORDERS_PER_PAGE = 5  # For /history pagination
 
 # ----------------------------
 # JSON STORAGE
@@ -218,51 +217,48 @@ async def ongoing_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Order# {oid}: {last_entry['status']} by {last_entry.get('agent', 'Unknown')} at {last_entry.get('timestamp', 'Unknown')}\n"
     await update.message.reply_text(msg)
 
-# ----------------------------
-# HISTORY WITH MESSAGE BUTTONS
-# ----------------------------
-async def show_history_page_msg(update, context, orders_list, page=0):
-    start_idx = page * ORDERS_PER_PAGE
-    end_idx = start_idx + ORDERS_PER_PAGE
-    page_orders = orders_list[start_idx:end_idx]
-
-    text = f"**Order History (Page {page + 1})**\n"
-    for oid, info in page_orders:
-        text += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']} by {info['agent']}\n"
-
-    buttons = []
-    if start_idx > 0:
-        buttons.append(KeyboardButton("⬅️ Prev"))
-    if end_idx < len(orders_list):
-        buttons.append(KeyboardButton("Next ➡️"))
-
-    reply_markup = ReplyKeyboardMarkup([buttons], resize_keyboard=True, one_time_keyboard=True) if buttons else None
-    await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
-
-async def history_command_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Admin only.")
-    data = load_data()
-    orders_list = list(data.items())
-    if not orders_list:
-        return await update.message.reply_text("No orders recorded yet.")
-    context.user_data["history_page"] = 0
-    context.user_data["orders_list"] = orders_list
-    await show_history_page_msg(update, context, orders_list, page=0)
+        return await update.message.reply_text("❌ Only admins can view stats.")
 
-async def history_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text not in ["Next ➡️", "⬅️ Prev"]:
-        return
-    page = context.user_data.get("history_page", 0)
-    orders_list = context.user_data.get("orders_list", [])
-    if update.message.text == "Next ➡️":
-        page += 1
-    elif update.message.text == "⬅️ Prev":
-        page -= 1
-    max_page = (len(orders_list) - 1) // ORDERS_PER_PAGE
-    page = max(0, min(page, max_page))
-    context.user_data["history_page"] = page
-    await show_history_page_msg(update, context, orders_list, page)
+    data = load_data()
+    if not data:
+        return await update.message.reply_text("No orders recorded yet.")
+
+    total = 0
+    done_count = 0
+    in_progress = 0
+    no_answer = 0
+    agent_stats = {}
+
+    for oid, info in data.items():
+        status = info.get("status", "").lower()
+        agent = info.get("agent", "Unknown")
+
+        agent_stats.setdefault(agent, {"total": 0, "done": 0})
+        agent_stats[agent]["total"] += 1
+
+        total += 1
+        if "completed" in status or status == STATUS_MAP["done"].lower():
+            done_count += 1
+            agent_stats[agent]["done"] += 1
+        elif "no answer" in status or status == STATUS_MAP["no"].lower():
+            no_answer += 1
+        else:
+            in_progress += 1
+
+    message = (
+        f"📊 Today's Order Stats\n"
+        f"Total orders updated: {total}\n"
+        f"✅ Completed: {done_count}\n"
+        f"🚚 In progress: {in_progress}\n"
+        f"❌ No answer: {no_answer}\n\n"
+        f"🧑‍🤝‍🧑 Per-Agent Stats\n"
+    )
+    for agent, stats_info in agent_stats.items():
+        message += f"{agent}: {stats_info['total']} updated, ✅ {stats_info['done']} done\n"
+
+    await update.message.reply_text(message)
 
 # ----------------------------
 # MAIN
@@ -278,12 +274,11 @@ def main():
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("comp", completed_orders))
     app.add_handler(CommandHandler("status", ongoing_orders))
-    app.add_handler(CommandHandler("history", history_command_msg))
+    app.add_handler(CommandHandler("stats", stats))
 
     # Messages
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), history_navigation))
 
     print("Bot running with PTB v21+ (Python 3.13 compatible)")
     app.run_polling()
