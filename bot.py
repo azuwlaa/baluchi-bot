@@ -45,10 +45,6 @@ def now_gmt5():
 # HELPER FUNCTIONS
 # ----------------------------
 async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name, status_full, action="Update", user_id=None):
-    """
-    Send agent log to channel with dynamic hashtag and hyperlinked agent.
-    Uses HTML parsing to avoid MarkdownV2 escaping issues.
-    """
     orders_text = ", ".join(orders)
     agent_html = f'<a href="tg://user?id={user_id}">{agent_name}</a>' if user_id else agent_name
     message = (
@@ -215,27 +211,41 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     data = load_data()
     updated = []
+
     for oid, info in data.items():
-        if info.get("status") == STATUS_MAP["done"] or info.get("status") == STATUS_MAP["no"]:
+        # Skip if done, no, or not touched by this agent
+        if info.get("status") == STATUS_MAP["done"]:
             continue
+        if info.get("status") == STATUS_MAP["no"]:
+            continue
+        if info.get("agent") != agent:
+            continue
+        # Mark done
         info["status"] = STATUS_MAP["done"]
         info["timestamp"] = now_gmt5().strftime("%H:%M")
-        info["agent"] = agent
         info.setdefault("history", []).append({
             "status": STATUS_MAP["done"],
             "agent": agent,
             "timestamp": info["timestamp"]
         })
         updated.append(oid)
+
     save_data(data)
+
     if not updated:
         return await update.message.reply_text(
-            "No orders eligible to mark as done. Orders with 'no' must be done manually."
+            "No eligible orders to mark as done. Only your own orders in progress can be done."
         )
-    msg = await update.message.reply_text(f"✅ Marked {len(updated)} order(s) as done by {agent}")
+
+    msg = await update.message.reply_text(
+        f"✅ Marked {len(updated)} order(s) as done by {agent}"
+    )
     await asyncio.sleep(5)
-    try: await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
-    except: pass
+    try:
+        await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+    except:
+        pass
+
     await send_agent_log(context, updated, agent, STATUS_MAP["done"], action="Done", user_id=user_id)
 
 async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
