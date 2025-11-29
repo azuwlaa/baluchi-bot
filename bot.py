@@ -216,8 +216,119 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data({})
     await update.message.reply_text("✅ All order history has been cleared.")
 
-# Placeholder for other commands: /done, /undone, /comp, /status, /stats, /mystats
-# Implement them following the previous versions you had.
+# ----------------------------
+# /done command (agent-specific)
+# ----------------------------
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.message.from_user.full_name
+    user_id = update.message.from_user.id
+    data = load_data()
+    updated = []
+
+    for oid, info in data.items():
+        if info.get("agent") != user_name:
+            continue
+        if info.get("status") == STATUS_MAP["done"]:
+            continue
+        if "no answer" in info.get("status", "").lower():
+            continue
+        data[oid]["status"] = STATUS_MAP["done"]
+        data[oid]["timestamp"] = now_gmt5().strftime("%H:%M")
+        updated.append(oid)
+    save_data(data)
+
+    if updated:
+        await update.message.reply_text(f"✅ You marked {len(updated)} order(s) as done.")
+        await send_agent_log(context, updated, user_name, STATUS_MAP["done"], action="Done", user_id=user_id)
+
+# ----------------------------
+# /undone command
+# ----------------------------
+async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("❌ Only admins can undo orders.")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /undone <order#>")
+        return
+    order_id = args[0]
+    data = load_data()
+    if order_id in data and data[order_id]["status"] == STATUS_MAP["done"]:
+        data[order_id]["status"] = "Undone"
+        save_data(data)
+        await update.message.reply_text(f"✅ Order {order_id} undone.")
+    else:
+        await update.message.reply_text("❌ That order is not done or doesn't exist.")
+
+# ----------------------------
+# /comp command
+# ----------------------------
+async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    comp_orders = [(oid, info) for oid, info in data.items() if info.get("status") == STATUS_MAP["done"]]
+    if not comp_orders:
+        await update.message.reply_text("No completed orders yet.")
+        return
+    message = "✅ Completed Orders:\n"
+    for oid, info in comp_orders:
+        message += f"Order# {oid}: by {info['agent']} at {info['timestamp']}\n"
+    await update.message.reply_text(message)
+
+# ----------------------------
+# /status command (admin-only)
+# ----------------------------
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("❌ Only admins can use this command.")
+        return
+    data = load_data()
+    ongoing = [(oid, info) for oid, info in data.items() if info.get("status") != STATUS_MAP["done"]]
+    if not ongoing:
+        await update.message.reply_text("No ongoing orders.")
+        return
+    message = "🚚 Ongoing Orders:\n"
+    for oid, info in ongoing:
+        message += f"Order# {oid}: {info['status']} by {info['agent']} ⏰ {info['timestamp']}\n"
+    await update.message.reply_text(message)
+
+# ----------------------------
+# /stats command (admin-only)
+# ----------------------------
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("❌ Only admins can view stats.")
+        return
+    data = load_data()
+    agent_stats = {}
+    for oid, info in data.items():
+        agent = info.get("agent", "Unknown")
+        if agent not in agent_stats:
+            agent_stats[agent] = {"total": 0, "done": 0}
+        agent_stats[agent]["total"] += 1
+        if info.get("status") == STATUS_MAP["done"]:
+            agent_stats[agent]["done"] += 1
+    message = "📊 Agent Stats:\n"
+    for agent, s in agent_stats.items():
+        message += f"{agent}: total {s['total']}, done {s['done']}\n"
+    await update.message.reply_text(message)
+
+# ----------------------------
+# /mystats command
+# ----------------------------
+async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.message.from_user.full_name
+    data = load_data()
+    total = done = 0
+    for oid, info in data.items():
+        if info.get("agent") != user_name:
+            continue
+        total += 1
+        if info.get("status") == STATUS_MAP["done"]:
+            done += 1
+    await update.message.reply_text(f"Your stats: total updated: {total}, done: {done}")
 
 # ----------------------------
 # MAIN
@@ -229,7 +340,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", myorders))
     app.add_handler(CommandHandler("reset", reset))
-    # Add other command handlers here...
+    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("undone", undone))
+    app.add_handler(CommandHandler("comp", completed_orders))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("mystats", mystats))
 
     # Messages
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
