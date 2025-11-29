@@ -14,7 +14,7 @@ from telegram.ext import (
 # ----------------------------
 # CONFIG
 # ----------------------------
-BOT_TOKEN = " "
+BOT_TOKEN = ""
 GROUP_ID = -1003463796946  # Replace with your Telegram group ID
 ADMINS = [624102836, 7477828866]  # Replace with Telegram IDs of admins
 AGENT_LOG_CHANNEL = -1003484693080  # Replace with a channel ID for agent logs
