@@ -44,33 +44,24 @@ def now_gmt5():
 # ----------------------------
 # HELPER FUNCTIONS
 # ----------------------------
-def escape_md(text):
-    """Escape text for MarkdownV2"""
-    escape_chars = "_*[]()~`>#+-=|{}.!"
-    for ch in escape_chars:
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
 async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name, status_full, action="Update", user_id=None):
     """
     Send agent log to channel with dynamic hashtag and hyperlinked agent.
-    user_id: Telegram user id for hyperlink
+    Uses HTML parsing to avoid MarkdownV2 escaping issues.
     """
     orders_text = ", ".join(orders)
-    agent_md = f"[{escape_md(agent_name)}](tg://user?id={user_id})" if user_id else escape_md(agent_name)
-    action_md = escape_md(action)
-
+    agent_html = f'<a href="tg://user?id={user_id}">{agent_name}</a>' if user_id else agent_name
     message = (
-        f"\\#{action_md}:\n"
-        f"• Orders#: {escape_md(orders_text)}\n"
-        f"• Agent: {agent_md}\n"
-        f"• Time: {escape_md(now_gmt5().strftime('%H:%M'))} ⏰\n"
-        f"• Status: {escape_md(status_full)}"
+        f"<b>#{action}</b>\n"
+        f"• Orders#: {orders_text}\n"
+        f"• Agent: {agent_html}\n"
+        f"• Time: {now_gmt5().strftime('%H:%M')} ⏰\n"
+        f"• Status: {status_full}"
     )
     await context.bot.send_message(
         chat_id=AGENT_LOG_CHANNEL,
         text=message,
-        parse_mode="MarkdownV2"
+        parse_mode="HTML"
     )
 
 async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
@@ -325,7 +316,7 @@ def main():
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
 
-    print("Bot running with PTB v21+ (Python 3.13 compatible)")
+    print("Bot running with PTB v21+ (Python 3.13 compatible, HTML logs)")
     app.run_polling()
 
 if __name__ == "__main__":
