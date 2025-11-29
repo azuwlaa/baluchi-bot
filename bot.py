@@ -224,7 +224,8 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 # COMMAND HANDLERS
 # ----------------------------
-# Same as previous version: start, myorders, reset, undone, done_command, completed_orders, ongoing_orders, stats, mystats
+# start, myorders, reset, undone, done_command, completed_orders, ongoing_orders, stats, mystats
+# (same as previous versions; no /setgroup)
 
 # ----------------------------
 # MAIN
