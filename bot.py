@@ -73,10 +73,14 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
 # ----------------------------
 async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if not update.message.text.isdigit():
+    text = update.message.text.strip()
+
+    if not text.isdigit():
         return
+
     data = load_data()
-    oid = update.message.text.strip()
+    oid = text
+
     if oid in data:
         info = data[oid]
         await update.message.reply_text(
@@ -86,6 +90,7 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"By: {info['agent']}"
         )
     else:
+        # Only send this as a private message to the user
         await context.bot.send_message(
             chat_id=user_id,
             text="❌ This order hasn't been updated yet!"
@@ -106,30 +111,22 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not orders: return
         data = load_data()
 
-        existing_orders, non_existing_orders = [], []
-        for oid in orders:
-            if oid in data:
-                existing_orders.append(oid)
-            else:
-                non_existing_orders.append(oid)
-
-        if non_existing_orders:
-            await update.message.reply_text(
-                f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
-            )
-
-        orders = existing_orders
-        if not orders: return
-
         updated = []
+        non_existing_orders = []
+
         for oid in orders:
+            if oid not in data:
+                non_existing_orders.append(oid)
+                continue
             current_order = data[oid]
+
             if current_order.get("status") == STATUS_MAP["done"]:
                 completed_by = current_order.get("agent", "Unknown")
                 await update.message.reply_text(
                     f"⚠️ Order {oid} has already been delivered by {completed_by}!"
                 )
                 continue
+
             current_order["status"] = STATUS_MAP["done"]
             current_order["timestamp"] = now_gmt5().strftime("%H:%M")
             current_order["agent"] = agent_name
@@ -138,8 +135,16 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "agent": agent_name,
                 "timestamp": current_order["timestamp"]
             })
+            data[oid] = current_order
             updated.append(oid)
+
         save_data(data)
+
+        if non_existing_orders:
+            await update.message.reply_text(
+                f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
+            )
+
         if updated:
             await update.message.reply_text(
                 f"✅ Orders {', '.join(updated)} marked as done manually by {agent_name}"
@@ -158,24 +163,10 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not orders: return
 
     data = load_data()
-    existing_orders, non_existing_orders = [], []
-    for oid in orders:
-        if oid in data:
-            existing_orders.append(oid)
-        else:
-            non_existing_orders.append(oid)
-
-    if non_existing_orders:
-        await update.message.reply_text(
-            f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
-        )
-
-    orders = existing_orders
-    if not orders: return
-
     updated = []
+
     for oid in orders:
-        current_order = data[oid]
+        current_order = data.get(oid, {"status": "", "timestamp": "", "agent": "", "history": []})
 
         # Skip done orders and alert who completed it
         if current_order.get("status") == STATUS_MAP["done"]:
@@ -185,14 +176,18 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             continue
 
+        # Update or create
         current_order["status"] = status_full
         current_order["timestamp"] = now_gmt5().strftime("%H:%M")
         current_order["agent"] = agent_name
-        history_list = current_order.get("history", [])
-        history_list.append({"status": status_full,"agent": agent_name,"timestamp": current_order["timestamp"]})
-        current_order["history"] = history_list
+        current_order.setdefault("history", []).append({
+            "status": status_full,
+            "agent": agent_name,
+            "timestamp": current_order["timestamp"]
+        })
         data[oid] = current_order
         updated.append(oid)
+
     save_data(data)
     if status_key == "no":
         await notify_admins(context, updated, agent_name)
