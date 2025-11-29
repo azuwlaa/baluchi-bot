@@ -1,113 +1,108 @@
-# Telegram Order Status Bot
+Baluchi Telegram Bot
 
-This repository contains a Telegram bot for managing and tracking delivery orders.
+A Telegram bot for managing delivery orders with per-agent tracking, order history, and real-time updates. Built with Python 3.13 and python-telegram-bot v21+.
 
----
+Features
 
-## Features
+Per-agent order tracking: Each order records which agent updated it, what status, and when.
 
-* Updates orders in a specific group only.
-* Delivery agents automatically tracked.
-* Admin-only commands:
+Immutable completed orders: Orders marked as done cannot be changed unless /undone is used.
 
-  * `/history` - view all order updates
-  * `/stats` - view agent stats
-  * `/reset` - clear order history
-* Agents can use `/myorders` to see their updated orders.
-* Auto-delete confirmation messages after 5 seconds.
-* GMT+5 timezone timestamps.
-* Clean and elegant status messages with emojis.
-* Supports multiple orders in one message, e.g., `12345,12346 otw`.
+Order status commands:
 
----
+/myorders → Orders updated by the current agent
 
-## Setup
+/history → Full order history (admin only)
 
-### Requirements
+/stats → Summary of orders per agent (admin only)
 
-Create a `requirements.txt` file:
+/comp → View all completed orders with agent & timestamp
 
-```
-python-telegram-bot>=20.3
-```
+/status → View ongoing orders
+
+/done → Mark all eligible orders as done
+
+/undone <order#> → Revert a completed order (admin only)
+
+Group listener: Agents can update orders directly by sending messages in the group in the format:
+
+123,124,125 out
+126 got
+
+
+No answer tracking: If an order is marked as no, all admins are notified.
+
+Auto-delete confirmation messages: Clean chat after 5 seconds.
+
+Requirements
+
+Python 3.13+
+
+python-telegram-bot v21+
+
+Virtual environment recommended
 
 Install dependencies:
 
-```bash
-pip install -r requirements.txt
-```
+pip install --pre python-telegram-bot==21.4b0
 
-### Configuration
+Setup
 
-In `bot.py`, configure the following variables:
+Clone or copy the bot files:
 
-```python
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token
-GROUP_ID = -1001234567890           # Replace with your Telegram group ID
-ADMINS = [12345678, 98765432]       # Replace with admin user IDs
-```
-
-### Running the bot
-
-```bash
-python bot.py
-```
-
----
-
-## Folder Structure
-
-```
-telegram-order-status-bot/
+baluchi-bot/
 ├── bot.py
-├── orders.json  # Automatically created
-├── requirements.txt
-└── README.md
-```
+├── orders.json
+├── README.md
 
----
 
-## Usage
+Update configuration in bot.py:
 
-### Order Status Updates (Group)
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+GROUP_ID = -100XXXXXXXXXX
+ADMINS = [123456789, 987654321]
+AGENT_LOG_CHANNEL = -100XXXXXXXXXX
 
-Delivery agents send order updates in the group using the format:
 
-```
-12345 out
-12345,12346 otw
-```
+Run the bot:
 
-Available status codes:
+python bot.py
 
-* `out` - Out for delivery
-* `otw` - On the way to city Hulhumale'
-* `got` - Received by Hulhumale' agents
-* `done` - Order delivery completed
-* `no` - No answer from the number
+Commands
+Command	Description
+/start	Welcome message
+/myorders	Orders updated by you
+/history	Full order history (admin only)
+/stats	Orders summary per agent (admin only)
+/reset	Clear all order history (admin only)
+/undone <id>	Revert a completed order (admin only)
+/done	Mark all eligible orders as done
+/comp	View all completed orders with agent & time
+/status	View ongoing orders
+Group Order Format
 
-The bot replies with a confirmation message that auto-deletes after 5 seconds.
+Agents can update orders by sending messages in group chat:
 
-### Admin Commands (Group or Private)
+123 out
+124,125 otw
+126 got
+127 no
 
-* `/history` - View order history.
-* `/stats` - View daily stats per agent.
-* `/reset` - Clear all order history.
 
-### Agent Commands
+out → Out for delivery
 
-* `/myorders` - View orders updated by yourself.
+otw → On the way to Hulhumale'
 
----
+got → Received by Hulhumale' agents
 
-### Notes
+done → Order completed
 
-* Make sure the bot is added to the group.
-* Only the specified `GROUP_ID` can update orders.
-* Admin IDs must be set in `ADMINS`.
-* Time is shown in GMT+5.
-* Multiple order updates can be sent in one message, separated by commas.
+no → No answer from customer
 
----
+Notes
 
-This bot is ready to be deployed and pushed to GitHub.
+Completed orders (done) cannot be changed by agents directly. Only admins can use /undone to revert.
+
+Order history tracks every change including agent name and timestamp.
+
+Notifications: If an order is marked no, all admins are automatically notified
