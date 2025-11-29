@@ -107,7 +107,6 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not orders: return
         data = load_data()
 
-        # Separate existing vs non-existing orders
         existing_orders, non_existing_orders = [], []
         for oid in orders:
             if oid in data:
@@ -116,9 +115,8 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 non_existing_orders.append(oid)
 
         if non_existing_orders:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
+            await update.message.reply_text(
+                f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
             )
 
         orders = existing_orders
@@ -127,6 +125,9 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         updated = []
         for oid in orders:
             current_order = data[oid]
+            if current_order.get("status") == STATUS_MAP["done"]:
+                await update.message.reply_text(f"⚠️ Order {oid} has already been delivered!")
+                continue
             current_order["status"] = STATUS_MAP["done"]
             current_order["timestamp"] = now_gmt5().strftime("%H:%M")
             current_order["agent"] = agent_name
@@ -135,7 +136,6 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "agent": agent_name,
                 "timestamp": current_order["timestamp"]
             })
-            data[oid] = current_order
             updated.append(oid)
         save_data(data)
         if updated:
@@ -164,9 +164,8 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             non_existing_orders.append(oid)
 
     if non_existing_orders:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
+        await update.message.reply_text(
+            f"❌ These orders haven't been updated yet: {', '.join(non_existing_orders)}"
         )
 
     orders = existing_orders
@@ -175,8 +174,11 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     updated = []
     for oid in orders:
         current_order = data[oid]
+
         if current_order.get("status") == STATUS_MAP["done"]:
-            continue
+            await update.message.reply_text(f"⚠️ Order {oid} has already been delivered!")
+            continue  # Skip updating done orders
+
         current_order["status"] = status_full
         current_order["timestamp"] = now_gmt5().strftime("%H:%M")
         current_order["agent"] = agent_name
