@@ -14,7 +14,7 @@ DATA_FILE = "orders.json"
 
 ADMINS = [624102836, 7477828866]
 AGENT_LOG_CHANNEL = -1003484693080
-GROUP_ID = -1003463796946  # static main group
+GROUP_ID = -1003463796946  # main group
 
 STATUS_MAP = {
     "out": "Out for delivery",
@@ -216,9 +216,6 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data({})
     await update.message.reply_text("✅ All order history has been cleared.")
 
-# ----------------------------
-# /done command (agent-specific)
-# ----------------------------
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.full_name
     user_id = update.message.from_user.id
@@ -241,9 +238,6 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ You marked {len(updated)} order(s) as done.")
         await send_agent_log(context, updated, user_name, STATUS_MAP["done"], action="Done", user_id=user_id)
 
-# ----------------------------
-# /undone command
-# ----------------------------
 async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -263,72 +257,126 @@ async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ That order is not done or doesn't exist.")
 
-# ----------------------------
-# /comp command
-# ----------------------------
 async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     comp_orders = [(oid, info) for oid, info in data.items() if info.get("status") == STATUS_MAP["done"]]
+
     if not comp_orders:
         await update.message.reply_text("No completed orders yet.")
         return
-    message = "✅ Completed Orders:\n"
-    for oid, info in comp_orders:
-        message += f"Order# {oid}: by {info['agent']} at {info['timestamp']}\n"
-    await update.message.reply_text(message)
 
-# ----------------------------
-# /status command (admin-only)
-# ----------------------------
+    message = "✅ <b>Completed Orders</b>\n\n"
+    for oid, info in comp_orders:
+        message += f"📦 Order# {oid}: by <b>{info['agent']}</b> at {info['timestamp']}\n"
+
+    await update.message.reply_text(message, parse_mode="HTML")
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
         await update.message.reply_text("❌ Only admins can use this command.")
         return
-    data = load_data()
-    ongoing = [(oid, info) for oid, info in data.items() if info.get("status") != STATUS_MAP["done"]]
-    if not ongoing:
-        await update.message.reply_text("No ongoing orders.")
-        return
-    message = "🚚 Ongoing Orders:\n"
-    for oid, info in ongoing:
-        message += f"Order# {oid}: {info['status']} by {info['agent']} ⏰ {info['timestamp']}\n"
-    await update.message.reply_text(message)
 
-# ----------------------------
-# /stats command (admin-only)
-# ----------------------------
+    data = load_data()
+    ongoing_orders = [(oid, info) for oid, info in data.items() if info.get("status") != STATUS_MAP["done"]]
+
+    if not ongoing_orders:
+        await update.message.reply_text("🚀 No ongoing orders.")
+        return
+
+    total_ongoing = len(ongoing_orders)
+
+    message = f"🚚 <b>Ongoing Orders</b>\n\n"
+    message += f"📦 Total ongoing orders: {total_ongoing}\n\n"
+
+    for oid, info in ongoing_orders:
+        agent = info.get("agent", "Unknown")
+        status = info.get("status", "Unknown")
+        timestamp = info.get("timestamp", "")
+        message += f"📦 Order# {oid}: {status} by <b>{agent}</b> ⏰ {timestamp}\n"
+
+    await update.message.reply_text(message, parse_mode="HTML")
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
         await update.message.reply_text("❌ Only admins can view stats.")
         return
+
     data = load_data()
     agent_stats = {}
-    for oid, info in data.items():
-        agent = info.get("agent", "Unknown")
-        if agent not in agent_stats:
-            agent_stats[agent] = {"total": 0, "done": 0}
-        agent_stats[agent]["total"] += 1
-        if info.get("status") == STATUS_MAP["done"]:
-            agent_stats[agent]["done"] += 1
-    message = "📊 Agent Stats:\n"
-    for agent, s in agent_stats.items():
-        message += f"{agent}: total {s['total']}, done {s['done']}\n"
-    await update.message.reply_text(message)
+    total_orders = 0
+    total_done = 0
+    total_in_progress = 0
+    total_no_answer = 0
 
-# ----------------------------
-# /mystats command
-# ----------------------------
+    for oid, info in data.items():
+        total_orders += 1
+        status = info.get("status", "").lower()
+        agent = info.get("agent", "Unknown")
+
+        if agent not in agent_stats:
+            agent_stats[agent] = {"total": 0, "done": 0, "in_progress": 0, "no_answer": 0}
+
+        agent_stats[agent]["total"] += 1
+
+        if "completed" in status or "done" in status:
+            agent_stats[agent]["done"] += 1
+            total_done += 1
+        elif "no answer" in status:
+            agent_stats[agent]["no_answer"] += 1
+            total_no_answer += 1
+        else:
+            agent_stats[agent]["in_progress"] += 1
+            total_in_progress += 1
+
+    message = (
+        f"📊 <b>All Agents Stats</b>\n\n"
+        f"📦 Total Orders: {total_orders}\n"
+        f"🟢 Completed: {total_done}\n"
+        f"🚚 In Progress: {total_in_progress}\n"
+        f"⚠️ No Answer: {total_no_answer}\n\n"
+    )
+
+    for agent, stats in agent_stats.items():
+        message += (
+            f"🧑 <b>{agent}</b>\n"
+            f"   📦 Total: {stats['total']}\n"
+            f"   🟢 Completed: {stats['done']}\n"
+            f"   🚚 In Progress: {stats['in_progress']}\n"
+            f"   ⚠️ No Answer: {stats['no_answer']}\n\n"
+        )
+
+    await update.message.reply_text(message, parse_mode="HTML")
+
 async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.full_name
     data = load_data()
-    total = done = 0
+
+    total = 0
+    done = 0
+    in_progress = 0
+    no_answer = 0
+
     for oid, info in data.items():
         if info.get("agent") != user_name:
             continue
         total += 1
-        if info.get("status") == STATUS_MAP["done"]:
+        status = info.get("status", "").lower()
+        if "completed" in status or "done" in status:
             done += 1
-    await update.message.reply_text(f"Your stats: total updated: {total}, done: {done}")
+        elif "no answer" in status:
+            no_answer += 1
+        else:
+            in_progress += 1
+
+    message = (
+        f"📊 <b>{user_name}'s Order Stats</b>\n\n"
+        f"🟢 Completed: {done}\n"
+        f"🚚 In Progress: {in_progress}\n"
+        f"⚠️ No Answer: {no_answer}\n"
+        f"📦 Total Orders Updated: {total}"
+    )
+
+    await update.message.reply_text(message, parse_mode="HTML")
 
 # ----------------------------
 # MAIN
