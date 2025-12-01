@@ -494,7 +494,7 @@ def main():
     app.add_handler(CommandHandler("urgent", urgent_command))
 
     # Messages
-    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, urgent_private_handler))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
     app.add_handler(MessageHandler(filters.TEXT & filters.PRIVATE, urgent_private_handler))
 
