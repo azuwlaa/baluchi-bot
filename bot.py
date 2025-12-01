@@ -19,6 +19,7 @@ STATUS_MAP = {
     "out": "Out for delivery",
     "otw": "On the way to city Hulhumale'",
     "got": "Received by Hulhumale' agents",
+    "air": "On the way to airport",  # NEW STATUS
     "done": "Order delivery completed",
     "no": "No answer from the number",
 }
@@ -84,6 +85,8 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Updated: {info['timestamp']} ⏰\n"
             f"By: {info['agent']}"
         )
+    else:
+        await update.message.reply_text("❌ This order hasn't been updated yet.")  # NEW FEATURE
 
 async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.id != GROUP_ID or not update.message.text:
@@ -133,26 +136,42 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not orders: return
     data = load_data()
     updated = []
+
     for oid in orders:
         current_order = data.get(oid, {})
+
+        # NEW: If already done → block update
         if current_order.get("status") == STATUS_MAP["done"]:
+            await update.message.reply_text(
+                f"❌ Order {oid} has already been delivered by {current_order.get('agent','Unknown')}."
+            )
             continue
+
         current_order["status"] = status_full
         current_order["timestamp"] = now_gmt5().strftime("%H:%M")
         current_order["agent"] = agent_name
         history_list = current_order.get("history", [])
-        history_list.append({"status": status_full,"agent": agent_name,"timestamp": current_order["timestamp"]})
+        history_list.append({
+            "status": status_full,
+            "agent": agent_name,
+            "timestamp": current_order["timestamp"]
+        })
         current_order["history"] = history_list
         data[oid] = current_order
         updated.append(oid)
+
     save_data(data)
+
     if status_key == "no":
         await notify_admins(context, updated, agent_name)
-    msg = await update.message.reply_text(f"✅ Updated {len(updated)} order(s) by {agent_name}")
-    await asyncio.sleep(5)
-    try: await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
-    except: pass
+
     if updated:
+        msg = await update.message.reply_text(
+            f"✅ Updated {len(updated)} order(s) by {agent_name}"
+        )
+        await asyncio.sleep(5)
+        try: await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+        except: pass
         await send_agent_log(context, updated, agent_name, status_full, action="Update", user_id=user_id)
 
 # ----------------------------
@@ -171,6 +190,33 @@ async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for oid, info in orders:
         text += f"Order# {oid}: {info['status']} ⏰ {info['timestamp']}\n"
     await update.message.reply_text(text)
+
+async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):  # NEW FEATURE
+    user = update.message.from_user.full_name
+    data = load_data()
+
+    total = done = no_answer = in_progress = 0
+
+    for oid, info in data.items():
+        if info.get("agent") != user:
+            continue
+        total += 1
+        status = info.get("status", "").lower()
+        if status == STATUS_MAP["done"].lower():
+            done += 1
+        elif status == STATUS_MAP["no"].lower():
+            no_answer += 1
+        else:
+            in_progress += 1
+
+    msg = (
+        f"📊 Stats for {user}\n"
+        f"Total updated: {total}\n"
+        f"✅ Completed: {done}\n"
+        f"🚚 In progress: {in_progress}\n"
+        f"❌ No answer: {no_answer}"
+    )
+    await update.message.reply_text(msg)
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
@@ -213,14 +259,13 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     updated = []
 
     for oid, info in data.items():
-        # Skip if done, no, or not touched by this agent
         if info.get("status") == STATUS_MAP["done"]:
             continue
         if info.get("status") == STATUS_MAP["no"]:
             continue
         if info.get("agent") != agent:
             continue
-        # Mark done
+
         info["status"] = STATUS_MAP["done"]
         info["timestamp"] = now_gmt5().strftime("%H:%M")
         info.setdefault("history", []).append({
@@ -285,10 +330,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agent_stats.setdefault(agent, {"total": 0, "done": 0})
         agent_stats[agent]["total"] += 1
         total += 1
-        if "completed" in status or status == STATUS_MAP["done"].lower():
+        if status == STATUS_MAP["done"].lower():
             done_count += 1
             agent_stats[agent]["done"] += 1
-        elif "no answer" in status or status == STATUS_MAP["no"].lower():
+        elif status == STATUS_MAP["no"].lower():
             no_answer += 1
         else:
             in_progress += 1
@@ -306,6 +351,26 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
+# NEW: /check order-number
+async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = update.message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await update.message.reply_text("Usage: /check 12345")
+
+    oid = args[1]
+    data = load_data()
+
+    if oid not in data:
+        return await update.message.reply_text("❌ This order hasn't been updated yet.")
+
+    info = data[oid]
+    msg = f"📦 Order# {oid}\nCurrent status: {info['status']}\n\n📜 History:\n"
+
+    for entry in info.get("history", []):
+        msg += f"• {entry['status']} by {entry['agent']} at {entry['timestamp']}\n"
+
+    await update.message.reply_text(msg)
+
 # ----------------------------
 # MAIN
 # ----------------------------
@@ -315,10 +380,12 @@ def main():
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", myorders))
+    app.add_handler(CommandHandler("mystats", mystats))  # NEW
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("undone", undone))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("comp", completed_orders))
+    app.add_handler(CommandHandler("check", check_order))  # NEW
     app.add_handler(CommandHandler("status", ongoing_orders))
     app.add_handler(CommandHandler("stats", stats))
 
