@@ -370,27 +370,71 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_agent_log(context, updated, agent, STATUS_MAP["done"], action="Done", user_id=user_id)
 
-async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----------------------------
+# MODERN FORMATTED COMMANDS
+# ----------------------------
+async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = update.message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await update.message.reply_text("Usage: `/check 12345`", parse_mode="Markdown")
+
+    oid = args[1]
     data = load_data()
-    completed = [(oid, info) for oid, info in data.items() if info.get("status") == STATUS_MAP["done"]]
-    if not completed:
-        return await update.message.reply_text("No completed orders yet.")
-    msg = "✅ Completed Orders:\n"
-    for oid, info in completed:
-        last_entry = info.get("history", [])[-1]
-        msg += f"Order# {oid}: by {last_entry['agent']} at {last_entry['timestamp']}\n"
-    await update.message.reply_text(msg)
+
+    if oid not in data:
+        return await update.message.reply_text(f"Order `{oid}` has not been updated yet.", parse_mode="Markdown")
+
+    info = data[oid]
+    history = info.get("history", [])
+    if not history:
+        history_text = "_No history available._"
+    else:
+        history_sorted = sorted(history, key=lambda x: x["timestamp"], reverse=True)
+        history_lines = [f"- *{h['status']}* by _{h['agent']}_ at `{h['timestamp']}`" for h in history_sorted]
+        history_text = "\n".join(history_lines)
+
+    msg = (
+        f"📝 *Order* `{oid}` *Details*\n\n"
+        f"*Current Status:* {info['status']}\n"
+        f"*Last Updated:* `{info['timestamp']}`\n"
+        f"*Last Agent:* _{info['agent']}_\n\n"
+        f"*History (Newest First):*\n{history_text}"
+    )
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
 
 async def ongoing_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     ongoing = [(oid, info) for oid, info in data.items() if info.get("status") != STATUS_MAP["done"]]
     if not ongoing:
         return await update.message.reply_text("No ongoing orders.")
-    msg = "🚚 Ongoing Orders:\n"
+
+    msg_lines = ["🚚 *Ongoing Orders:*"]
     for oid, info in ongoing:
         last_entry = info.get("history", [])[-1] if info.get("history") else info
-        msg += f"Order# {oid}: {last_entry['status']} by {last_entry.get('agent', 'Unknown')} at {last_entry.get('timestamp', 'Unknown')}\n"
-    await update.message.reply_text(msg)
+        msg_lines.append(f"- Order `{oid}`: *{last_entry['status']}* by _{last_entry.get('agent','Unknown')}_ at `{last_entry.get('timestamp','Unknown')}`")
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+
+
+async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    completed = [(oid, info) for oid, info in data.items() if info.get("status") == STATUS_MAP["done"]]
+    if not completed:
+        return await update.message.reply_text("No completed orders yet.")
+
+    msg_lines = ["✅ *Completed Orders:*"]
+    for oid, info in completed:
+        history = info.get("history", [])
+        if history:
+            last_entry = history[-1]
+            history_text = f"*{last_entry['status']}* by _{last_entry['agent']}_ at `{last_entry['timestamp']}`"
+        else:
+            history_text = f"*{info['status']}* by _{info.get('agent','Unknown')}_ at `{info.get('timestamp','Unknown')}`"
+        msg_lines.append(f"- Order `{oid}`: {history_text}")
+
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
@@ -427,47 +471,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{agent}: {stats_info['total']} updated, ✅ {stats_info['done']} done\n"
 
     await update.message.reply_text(msg)
-
-# ----------------------------
-# CHECK COMMAND (📝) with history newest-first
-# ----------------------------
-async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = update.message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        return await update.message.reply_text(
-            "Usage: `/check 12345`", parse_mode="Markdown"
-        )
-
-    oid = args[1]
-    data = load_data()
-
-    if oid not in data:
-        return await update.message.reply_text(
-            f"Order `{oid}` has not been updated yet.", parse_mode="Markdown"
-        )
-
-    info = data[oid]
-    history = info.get("history", [])
-
-    if not history:
-        history_text = "_No history available._"
-    else:
-        # Sort newest first
-        history_sorted = sorted(history, key=lambda x: x["timestamp"], reverse=True)
-        history_lines = [
-            f"- *{h['status']}* by _{h['agent']}_ at `{h['timestamp']}`" for h in history_sorted
-        ]
-        history_text = "\n".join(history_lines)
-
-    msg = (
-        f"📝 *Order* `{oid}` *Details*\n\n"
-        f"*Current Status:* {info['status']}\n"
-        f"*Last Updated:* `{info['timestamp']}`\n"
-        f"*Last Agent:* _{info['agent']}_\n\n"
-        f"*History (Newest First):*\n{history_text}"
-    )
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 # ----------------------------
 # MAIN
