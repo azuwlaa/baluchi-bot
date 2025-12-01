@@ -67,20 +67,25 @@ def gmt5_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=5)))
 
 def get_shift(clock_time: datetime) -> str:
-    """Determine shift based on time"""
-    h, m = clock_time.hour, clock_time.minute
+    h = clock_time.hour
     if h < 17:
         return "Morning"
     return "Evening"
 
 def compute_late(clock_time: datetime, shift: str) -> int:
-    """Return late minutes"""
     if shift == "Morning":
         ref = clock_time.replace(hour=8, minute=30)
     else:
         ref = clock_time.replace(hour=17, minute=0)
     delta = clock_time - ref
     return max(0, int(delta.total_seconds() // 60))
+
+async def delete_after(msg, delay_s: int):
+    await asyncio.sleep(delay_s)
+    try:
+        await msg.delete()
+    except:
+        pass
 
 # ===== STAFF MANAGEMENT =====
 async def add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,7 +141,7 @@ async def clock_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ You have already clocked in today.")
         return
     late_minutes = compute_late(now, shift)
-    # Determine clock out time automatically
+    # Automatic clock-out
     if shift == "Morning":
         clock_out = now.replace(hour=17, minute=0)
     else:
@@ -148,15 +153,17 @@ async def clock_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     # Send log to channel
-    caption = f"#clock\n• Staff Name: {escape_markdown(user.full_name)}\n• Date: {date}\n• Time: {now.strftime('%H:%M')}\n• Message link: [Go to message](https://t.me/c/{str(GROUP_ID)[4:]}/{message.message_id})"
+    msg_link = f"https://t.me/c/{str(GROUP_ID)[4:]}/{message.message_id}"
+    caption = f"#clock\n• Staff Name: {escape_markdown(user.full_name)}\n• Date: {date}\n• Time: {now.strftime('%H:%M')}\n• Message link: [Go to message]({msg_link})"
     await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=caption, parse_mode=ParseMode.MARKDOWN)
-    await message.reply_text("✅ Clock-in recorded.", parse_mode=ParseMode.MARKDOWN)
+    confirm = await message.reply_text("✅ Clock-in recorded.")
+    asyncio.create_task(delete_after(confirm, 5))
 
 # ===== SICK/OFF COMMANDS =====
 async def mark_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
-    cmd = message.text.split()[0][1:]  # sick/off
+    cmd = message.text[1:]  # sick/off
     now = gmt5_now()
     date = now.strftime("%Y-%m-%d")
     conn = sqlite3.connect("frc_bot.db")
@@ -185,23 +192,16 @@ async def show_staff_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("Staff not found")
         return
     name = row[0]
-    # Fetch attendance
     cur.execute("SELECT status, COUNT(*) FROM attendance WHERE user_id=? GROUP BY status", (staff_id,))
     counts = {r[0]: r[1] for r in cur.fetchall()}
-    total_clocked = counts.get("Clocked In", 0)
-    total_absent = counts.get("Absent", 0)
-    total_late = counts.get("Clocked In", 0)  # sum late minutes
     cur.execute("SELECT SUM(late_minutes) FROM attendance WHERE user_id=?", (staff_id,))
     late_sum = cur.fetchone()[0] or 0
-    total_sick = counts.get("Sick", 0)
-    total_off = counts.get("Off", 0)
-    conn.close()
     text = f"*Attendance Summary for [{escape_markdown(name)}](tg://user?id={staff_id})*\n"
-    text += f"• Total Days Clocked: {total_clocked}\n"
-    text += f"• Absent Days: {total_absent}\n"
-    text += f"• Late Days: {total_late} (Total Late Minutes: {late_sum})\n"
-    text += f"• Sick Days: {total_sick}\n"
-    text += f"• Off Days: {total_off}\n"
+    text += f"• Total Clocked: {counts.get('Clocked In',0)}\n"
+    text += f"• Absent: {counts.get('Absent',0)}\n"
+    text += f"• Late: {counts.get('Clocked In',0)} (Total Minutes: {late_sum})\n"
+    text += f"• Sick: {counts.get('Sick',0)}\n"
+    text += f"• Off: {counts.get('Off',0)}\n"
     await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 # ===== BROKEN GLASS LOG =====
@@ -233,7 +233,8 @@ async def report_glass(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     caption = f"#update\n• Reported by: {escape_markdown(reporter.full_name)}\n• Broken by: {escape_markdown(broken_by)}\n• Date: {date}\n• Time: {time}\n• Message link: [Go to message]({msg_link})"
     await context.bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=caption, parse_mode=ParseMode.MARKDOWN)
-    await message.reply_text(f"✅ Report logged for {broken_by}")
+    confirm = await message.reply_text(f"✅ Report logged for {broken_by}")
+    asyncio.create_task(delete_after(confirm, 5))
 
 # ===== ATTENDANCE REPORT =====
 async def attendance_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -247,7 +248,6 @@ async def attendance_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("No attendance data found.")
         return
     df = pd.DataFrame(rows, columns=["Date", "Staff Name", "Status", "Clock In", "Clock Out", "Late Minutes", "User ID"])
-    # Create Excel
     file_path = f"Attendance_Report_{gmt5_now().strftime('%Y-%m')}.xlsx"
     df.to_excel(file_path, index=False)
     await message.reply_document(document=open(file_path, "rb"))
@@ -272,8 +272,9 @@ def main():
     app.add_handler(CommandHandler("rm", rm_staff))
     app.add_handler(CommandHandler("staff", list_staff))
 
-    # Clock-in/clock-out
-    app.add_handler(MessageHandler(filters.Regex(r"^at fr$") | filters.Regex(r"^/clock$"), clock_in))
+    # Clock-in
+    app.add_handler(CommandHandler("clock", clock_in))
+    app.add_handler(MessageHandler(filters.Regex(r"^at fr$"), clock_in))
 
     # Sick/off
     app.add_handler(CommandHandler("sick", mark_status))
