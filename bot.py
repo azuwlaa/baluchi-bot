@@ -15,20 +15,45 @@ ADMINS = [624102836, 7477828866]
 AGENT_LOG_CHANNEL = -1003484693080
 DATA_FILE = "orders.json"
 
+# ----------------------------
+# EXTENDED STATUS MAP
+# ----------------------------
 STATUS_MAP = {
     "out": "Out for delivery",
+
+    # OTW aliases
     "otw": "On the way to Hulhumale'",
+    "on": "On the way to Hulhumale'",
+    "ontheway": "On the way to Hulhumale'",
+    "on_the_way": "On the way to Hulhumale'",
+    "on-the-way": "On the way to Hulhumale'",
+
+    # GOT + all aliases
     "got": "Received by Hulhumale' agents",
+    "rwav": "Received by Hulhumale' agents",
+    "resv": "Received by Hulhumale' agents",
+    "reav": "Received by Hulhumale' agents",
+    "rcvd": "Received by Hulhumale' agents",
+    "rwsv": "Received by Hulhumale' agents",
+    "rwv": "Received by Hulhumale' agents",
+
     "air": "On the way to airport",
     "done": "Order delivery completed",
     "no": "No answer from the number",
 }
 
-ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re.IGNORECASE)
+# Accept multi-word statuses + slash/comma separators
+ORDER_PATTERN = re.compile(
+    r"^(?P<orders>[0-9 ,/]+)\s+(?P<status>[a-zA-Z _-]+)$",
+    re.IGNORECASE
+)
 
 # ----------------------------
-# JSON STORAGE
+# HELPERS
 # ----------------------------
+def normalize_status_key(text: str):
+    return text.lower().replace(" ", "").replace("-", "").replace("_", "")
+
 def load_data():
     if not os.path.exists(DATA_FILE):
         save_data({})
@@ -42,13 +67,10 @@ def save_data(data):
 def now_gmt5():
     return datetime.now(timezone.utc) + timedelta(hours=5)
 
-# ----------------------------
-# HELPER FUNCTIONS
-# ----------------------------
-async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name, status_full, action="Update", user_id=None):
+async def send_agent_log(context, orders, agent_name, status_full, action="Update", user_id=None):
     orders_text = ", ".join(orders)
-    agent_html = f'<a href="tg://user?id={user_id}">{agent_name}</a>' if user_id else agent_name
-    message = (
+    agent_html = f'<a href="tg://user?id={user_id}">{agent_name}</a>'
+    msg = (
         f"<b>#{action}</b>\n"
         f"• Orders#: {orders_text}\n"
         f"• Agent: {agent_html}\n"
@@ -57,11 +79,11 @@ async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name,
     )
     await context.bot.send_message(
         chat_id=AGENT_LOG_CHANNEL,
-        text=message,
+        text=msg,
         parse_mode="HTML"
     )
 
-async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
+async def notify_admins(context, orders, agent_name):
     msg = f"⚠️ Order(s) {', '.join(orders)} marked as NO ANSWER by {agent_name}"
     for admin in ADMINS:
         try:
@@ -70,9 +92,12 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
             pass
 
 # ----------------------------
-# URGENT HANDLERS
+# URGENT PM HANDLER
 # ----------------------------
-async def urgent_private_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def urgent_private_handler(update: Update, context):
+    if not update.message or not update.message.text:
+        return
+
     if update.message.chat.type != "private":
         return
 
@@ -85,62 +110,63 @@ async def urgent_private_handler(update: Update, context: ContextTypes.DEFAULT_T
     if user_id not in ADMINS:
         return await update.message.reply_text("❌ Only admins can send urgent alerts.")
 
-    numbers = re.findall(r"\b\d+\b", text)
+    numbers = [n for n in re.findall(r"\b\d+\b", text) if len(n) <= 6]
     if not numbers:
-        return await update.message.reply_text("❌ No order numbers found.")
-
-    urgent_text = f"🚨 URGENT ORDERS: {', '.join(numbers)}"
-
-    msg = await context.bot.send_message(
-        chat_id=GROUP_ID,
-        text=urgent_text
-    )
-
-    try:
-        await context.bot.pin_chat_message(chat_id=GROUP_ID, message_id=msg.message_id)
-    except:
-        pass
-
-    await update.message.reply_text("✅ Urgent message sent and pinned in group.")
-
-async def urgent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Only admins can send urgent alerts.")
-
-    args = update.message.text.split()
-    if len(args) < 2:
-        return await update.message.reply_text("Usage: /urgent 12345")
-
-    orders = [o for o in args[1:] if o.isdigit()]
-    if not orders:
         return await update.message.reply_text("❌ No valid order numbers provided.")
 
-    urgent_text = f"🚨 URGENT ORDERS: {', '.join(orders)}"
-
-    msg = await context.bot.send_message(
-        chat_id=GROUP_ID,
-        text=urgent_text
-    )
+    urgent_text = f"🚨 URGENT ORDERS: {', '.join(numbers)}"
+    msg = await context.bot.send_message(chat_id=GROUP_ID, text=urgent_text)
 
     try:
-        await context.bot.pin_chat_message(chat_id=GROUP_ID, message_id=msg.message_id)
+        await context.bot.pin_chat_message(GROUP_ID, msg.message_id)
     except:
         pass
 
-    await update.message.reply_text("✅ Urgent message sent and pinned in group.")
+    await update.message.reply_text("✅ Urgent message sent & pinned.")
 
 # ----------------------------
-# MESSAGE HANDLERS
+# COMMAND /urgent
 # ----------------------------
-async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.text.isdigit():
+async def urgent_command(update: Update, context):
+    if update.message.from_user.id not in ADMINS:
+        return await update.message.reply_text("❌ Admin only.")
+
+    args = update.message.text.split()[1:]
+    orders = [o for o in args if o.isdigit() and len(o) <= 6]
+
+    if not orders:
+        return await update.message.reply_text("❌ No valid order numbers.")
+
+    urgent_text = f"🚨 URGENT ORDERS: {', '.join(orders)}"
+    msg = await context.bot.send_message(GROUP_ID, urgent_text)
+
+    try:
+        await context.bot.pin_chat_message(GROUP_ID, msg.message_id)
+    except:
+        pass
+
+    await update.message.reply_text("✅ Urgent message sent & pinned.")
+
+# ----------------------------
+# LOOKUP ORDER
+# ----------------------------
+async def lookup_order(update: Update, context):
+    if not update.message or not update.message.text:
         return
+
+    text = update.message.text.strip()
+
+    if not text.isdigit():
+        return
+
+    if len(text) == 7:
+        return  # Ignore 7-digit numbers
+
     data = load_data()
-    oid = update.message.text.strip()
-    if oid in data:
-        info = data[oid]
+    if text in data:
+        info = data[text]
         await update.message.reply_text(
-            f"Order#: {oid}\n"
+            f"Order#: {text}\n"
             f"Status: {info['status']}\n"
             f"Updated: {info['timestamp']} ⏰\n"
             f"By: {info['agent']}"
@@ -148,84 +174,105 @@ async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ This order hasn't been updated yet.")
 
-async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.id != GROUP_ID or not update.message.text:
+# ----------------------------
+# GROUP LISTENER
+# ----------------------------
+async def group_listener(update: Update, context):
+    if not update.message or not update.message.text:
+        return
+
+    if update.message.chat.id != GROUP_ID:
         return
 
     text = update.message.text.strip()
     agent_name = update.message.from_user.full_name
     user_id = update.message.from_user.id
 
-    # Manual done per order
-    match_done = re.match(r"^([0-9 ,]+)\s+done$", text, re.IGNORECASE)
+    # DONE = same as /done
+    if text.lower() == "done":
+        return await done_command(update, context)
+
+    # Manual done: "123, 33 done"
+    match_done = re.match(r"^([0-9 ,/]+)\s+done$", text, re.IGNORECASE)
     if match_done:
-        orders = [o.strip() for o in match_done.group(1).split(",") if o.strip().isdigit()]
-        if not orders: return
+
+        raw_list = re.split(r"[,/ ]+", match_done.group(1))
+        orders = [o for o in raw_list if o.isdigit() and 1 <= len(o) <= 6]
+
+        if not orders:
+            return
+
         data = load_data()
         updated = []
 
         for oid in orders:
-            current_order = data.get(oid, {})
-            if current_order.get("status") == STATUS_MAP["done"]:
+            current = data.get(oid, {})
+            if current.get("status") == STATUS_MAP["done"]:
                 await update.message.reply_text(
-                    f"❌ Order {oid} has already been delivered by {current_order.get('agent','Unknown')}."
+                    f"❌ {oid} already delivered by {current.get('agent','Unknown')}."
                 )
                 continue
 
-            current_order["status"] = STATUS_MAP["done"]
-            current_order["timestamp"] = now_gmt5().strftime("%H:%M")
-            current_order["agent"] = agent_name
-            current_order.setdefault("history", []).append({
+            current["status"] = STATUS_MAP["done"]
+            current["timestamp"] = now_gmt5().strftime("%H:%M")
+            current["agent"] = agent_name
+            current.setdefault("history", []).append({
                 "status": STATUS_MAP["done"],
                 "agent": agent_name,
-                "timestamp": current_order["timestamp"]
+                "timestamp": current["timestamp"]
             })
-            data[oid] = current_order
+            data[oid] = current
             updated.append(oid)
 
         save_data(data)
 
         if updated:
-            await update.message.reply_text(
-                f"✅ Orders {', '.join(updated)} marked as done manually by {agent_name}"
-            )
+            await update.message.reply_text(f"✅ Marked {', '.join(updated)} as done.")
             await send_agent_log(context, updated, agent_name, STATUS_MAP["done"], action="Done", user_id=user_id)
+
         return
 
-    # Standard updates
+    # Standard updates: "12345 otw"
     match = ORDER_PATTERN.match(text)
-    if not match: return
+    if not match:
+        return
+
     orders_raw = match.group("orders")
-    status_key = match.group("status").lower()
-    if status_key not in STATUS_MAP: return
+    raw_list = re.split(r"[,/ ]+", orders_raw)
+    orders = [o for o in raw_list if o.isdigit() and 1 <= len(o) <= 6]
+
+    if not orders:
+        return
+
+    status_key = normalize_status_key(match.group("status"))
+
+    if status_key not in STATUS_MAP:
+        return
+
     status_full = STATUS_MAP[status_key]
-    orders = [o.strip() for o in orders_raw.split(",") if o.strip().isdigit()]
-    if not orders: return
 
     data = load_data()
     updated = []
 
     for oid in orders:
-        current_order = data.get(oid, {})
+        current = data.get(oid, {})
 
-        # Already done
-        if current_order.get("status") == STATUS_MAP["done"]:
+        if current.get("status") == STATUS_MAP["done"]:
             await update.message.reply_text(
-                f"❌ Order {oid} has already been delivered by {current_order.get('agent','Unknown')}."
+                f"❌ {oid} already delivered by {current.get('agent','Unknown')}."
             )
             continue
 
-        current_order["status"] = status_full
-        current_order["timestamp"] = now_gmt5().strftime("%H:%M")
-        current_order["agent"] = agent_name
-        history_list = current_order.get("history", [])
-        history_list.append({
+        current["status"] = status_full
+        current["timestamp"] = now_gmt5().strftime("%H:%M")
+        current["agent"] = agent_name
+        current.setdefault("history", []).append({
             "status": status_full,
             "agent": agent_name,
-            "timestamp": current_order["timestamp"]
+            "timestamp": current["timestamp"]
         })
-        current_order["history"] = history_list
-        data[oid] = current_order
+
+        data[oid] = current
         updated.append(oid)
 
     save_data(data)
@@ -234,31 +281,30 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_admins(context, updated, agent_name)
 
     if updated:
-        msg = await update.message.reply_text(f"✅ Updated {len(updated)} order(s) by {agent_name}")
+        msg = await update.message.reply_text(
+            f"✅ Updated {len(updated)} order(s) by {agent_name}"
+        )
         await asyncio.sleep(5)
         try:
-            await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+            await context.bot.delete_message(msg.chat_id, msg.message_id)
         except:
             pass
 
         await send_agent_log(context, updated, agent_name, status_full, action="Update", user_id=user_id)
 
 # ----------------------------
-# COMMAND HANDLERS
+# COMMANDS
 # ----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     await update.message.reply_text("Send an order number to get its status.")
 
-# ----------------------------
-# MYORDERS with history (📝)
-# ----------------------------
-async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def myorders(update, context):
     user = update.message.from_user.full_name
     data = load_data()
     orders = [(oid, info) for oid, info in data.items() if info.get("agent") == user]
 
     if not orders:
-        return await update.message.reply_text("You haven't updated any orders yet.")
+        return await update.message.reply_text("You haven't updated any orders.")
 
     msg_lines = [f"📝 *Orders updated by {user}:*"]
 
@@ -268,17 +314,18 @@ async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history_text = "_No history available._"
         else:
             history_sorted = sorted(history, key=lambda x: x["timestamp"], reverse=True)
-            history_lines = [f"  - *{h['status']}* at `{h['timestamp']}`" for h in history_sorted]
+            history_lines = [
+                f"  - *{h['status']}* at `{h['timestamp']}`" for h in history_sorted
+            ]
             history_text = "\n".join(history_lines)
 
-        msg_lines.append(f"\n*Order `{oid}`* (Current: *{info['status']}* at `{info['timestamp']}`)\n{history_text}")
+        msg_lines.append(
+            f"\n*Order `{oid}`* (Current: *{info['status']}* at `{info['timestamp']}`)\n{history_text}"
+        )
 
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
-# ----------------------------
-# MYSTATS
-# ----------------------------
-async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def mystats(update, context):
     user = update.message.from_user.full_name
     data = load_data()
 
@@ -287,8 +334,10 @@ async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for oid, info in data.items():
         if info.get("agent") != user:
             continue
+
         total += 1
         status = info.get("status", "").lower()
+
         if status == STATUS_MAP["done"].lower():
             done += 1
         elif status == STATUS_MAP["no"].lower():
@@ -305,55 +354,57 @@ async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
-# ----------------------------
-# CHECK ORDER HISTORY
-# ----------------------------
-async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def check_order(update, context):
     args = update.message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
+    if len(args) != 2 or not args[1].isdigit() or len(args[1]) == 7:
         return await update.message.reply_text("Usage: /check 12345")
+
     order_id = args[1]
     data = load_data()
+
     if order_id not in data:
         return await update.message.reply_text("❌ Order not found.")
+
     info = data[order_id]
     msg_lines = [f"📝 *Order `{order_id}` Details:*", f"Current Status: *{info['status']}*"]
+
     history = info.get("history", [])
     if not history:
         msg_lines.append("_No history available._")
     else:
         for h in history:
             msg_lines.append(f"- *{h['status']}* by {h['agent']} at `{h['timestamp']}`")
+
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
-# ----------------------------
-# RESET ALL DATA
-# ----------------------------
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reset(update, context):
     if update.message.from_user.id not in ADMINS:
         return await update.message.reply_text("❌ Admin only.")
     save_data({})
     await update.message.reply_text("✅ All order history cleared.")
 
-# ----------------------------
-# UNDONE ORDER
-# ----------------------------
-async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def undone(update, context):
     if update.message.from_user.id not in ADMINS:
         return await update.message.reply_text("❌ Admin only.")
+
     args = update.message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
+    if len(args) != 2 or not args[1].isdigit() or len(args[1]) == 7:
         return await update.message.reply_text("Usage: /undone 12345")
+
     order_id = args[1]
     data = load_data()
+
     if order_id not in data:
         return await update.message.reply_text("Order not found.")
+
     history = data[order_id].get("history", [])
     last_non_done = None
+
     for entry in reversed(history):
         if entry["status"] != STATUS_MAP["done"]:
             last_non_done = entry
             break
+
     if last_non_done:
         data[order_id]["status"] = last_non_done["status"]
         data[order_id]["timestamp"] = last_non_done["timestamp"]
@@ -362,24 +413,27 @@ async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data[order_id]["status"] = "Pending"
         data[order_id]["timestamp"] = now_gmt5().strftime("%H:%M")
         data[order_id]["agent"] = "Unknown"
+
     save_data(data)
-    await update.message.reply_text(f"🔄 Order {order_id} status reverted.")
+
+    await update.message.reply_text(f"🔄 Order {order_id} reverted.")
     await send_agent_log(context, [order_id], update.message.from_user.full_name, data[order_id]["status"], action="Undone", user_id=update.message.from_user.id)
 
 # ----------------------------
-# DONE COMMAND
+# /done command
 # ----------------------------
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def done_command(update, context):
     agent = update.message.from_user.full_name
     user_id = update.message.from_user.id
     data = load_data()
     updated = []
 
     for oid, info in data.items():
-        if info.get("status") == STATUS_MAP["done"] or info.get("status") == STATUS_MAP["no"]:
-            continue
         if info.get("agent") != agent:
             continue
+        if info.get("status") == STATUS_MAP["done"] or info.get("status") == STATUS_MAP["no"]:
+            continue
+
         info["status"] = STATUS_MAP["done"]
         info["timestamp"] = now_gmt5().strftime("%H:%M")
         info.setdefault("history", []).append({
@@ -387,72 +441,79 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "agent": agent,
             "timestamp": info["timestamp"]
         })
+
         updated.append(oid)
 
     save_data(data)
 
     if not updated:
-        return await update.message.reply_text(
-            "No eligible orders to mark as done. Only your own orders in progress can be done."
-        )
+        return await update.message.reply_text("No orders eligible to mark as done.")
 
     msg = await update.message.reply_text(
-        f"✅ Marked {len(updated)} order(s) as done by {agent}"
+        f"✅ Marked {len(updated)} order(s) as done."
     )
+
     await asyncio.sleep(5)
     try:
-        await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+        await context.bot.delete_message(msg.chat_id, msg.message_id)
     except:
         pass
 
     await send_agent_log(context, updated, agent, STATUS_MAP["done"], action="Done", user_id=user_id)
 
 # ----------------------------
-# COMPLETED ORDERS
+# COMPLETED & ONGOING
 # ----------------------------
-async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def completed_orders(update, context):
     data = load_data()
     completed = [(oid, info) for oid, info in data.items() if info.get("status") == STATUS_MAP["done"]]
+
     if not completed:
         return await update.message.reply_text("No completed orders yet.")
+
     msg_lines = ["✅ *Completed Orders:*"]
     for oid, info in completed:
-        last_entry = info.get("history", [])[-1] if info.get("history") else info
-        msg_lines.append(f"- Order `{oid}` by {last_entry.get('agent','Unknown')} at `{last_entry.get('timestamp','Unknown')}`")
+        last = info.get("history", [])[-1] if info.get("history") else info
+        msg_lines.append(f"- `{oid}` by {last['agent']} at `{last['timestamp']}`")
+
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
-# ----------------------------
-# ONGOING ORDERS
-# ----------------------------
-async def ongoing_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ongoing_orders(update, context):
     data = load_data()
     ongoing = [(oid, info) for oid, info in data.items() if info.get("status") != STATUS_MAP["done"]]
+
     if not ongoing:
         return await update.message.reply_text("No ongoing orders.")
+
     msg_lines = ["🚚 *Ongoing Orders:*"]
     for oid, info in ongoing:
-        last_entry = info.get("history", [])[-1] if info.get("history") else info
-        msg_lines.append(f"- Order `{oid}`: {last_entry.get('status','Unknown')} by {last_entry.get('agent','Unknown')} at `{last_entry.get('timestamp','Unknown')}`")
+        last = info.get("history", [])[-1] if info.get("history") else info
+        msg_lines.append(f"- `{oid}`: {last['status']} by {last['agent']} at `{last['timestamp']}`")
+
     await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
 # ----------------------------
-# STATS
+# /stats
 # ----------------------------
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update, context):
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Only admins can view stats.")
+        return await update.message.reply_text("❌ Admin only.")
+
     data = load_data()
     if not data:
         return await update.message.reply_text("No orders recorded yet.")
 
     total = done_count = in_progress = no_answer = 0
     agent_stats = {}
+
     for oid, info in data.items():
         status = info.get("status", "").lower()
         agent = info.get("agent", "Unknown")
+
         agent_stats.setdefault(agent, {"total": 0, "done": 0})
         agent_stats[agent]["total"] += 1
         total += 1
+
         if status == STATUS_MAP["done"].lower():
             done_count += 1
             agent_stats[agent]["done"] += 1
@@ -461,18 +522,19 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             in_progress += 1
 
-    msg_lines = [
+    lines = [
         "📊 *Today's Order Stats*",
-        f"Total orders updated: {total}",
+        f"Total updated: {total}",
         f"✅ Completed: {done_count}",
         f"🚚 In progress: {in_progress}",
-        f"❌ No answer: {no_answer}\n",
-        "🧑‍🤝‍🧑 *Per-Agent Stats*"
+        f"❌ No answer: {no_answer}",
+        "\n🧑‍🤝‍🧑 *Per-Agent Stats*"
     ]
-    for agent, stats_info in agent_stats.items():
-        msg_lines.append(f"- {agent}: {stats_info['total']} updated, ✅ {stats_info['done']} done")
 
-    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+    for agent, s in agent_stats.items():
+        lines.append(f"- {agent}: {s['total']} updated, ✅ {s['done']} done")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 # ----------------------------
 # MAIN
@@ -492,14 +554,14 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("check", check_order))
     app.add_handler(CommandHandler("urgent", urgent_command))
-    
-    # Messages
+
+    # Listeners
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, urgent_private_handler))
 
-    print("Bot running with PTB v21+ (Python 3.13 compatible, Markdown logs)")
-    app.run_polling()
+    print("Bot running...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
