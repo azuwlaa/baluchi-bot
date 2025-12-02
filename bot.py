@@ -1,298 +1,504 @@
+import json
+import os
 import re
-import sqlite3
-import asyncio
 from datetime import datetime, timedelta, timezone
 from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CommandHandler,
-    ContextTypes,
-    filters
-)
-from PIL import Image
-import io
-import pandas as pd
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import asyncio
 
-# ===== CONFIGURATION =====
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-GROUP_ID = -1001956620304   # Group where reports happen
-LOG_CHANNEL_ID = -1003449720539   # Channel where logs go
+# ----------------------------
+# CONFIG
+# ----------------------------
+BOT_TOKEN = ""  # Add your bot token
+GROUP_ID = -1003463796946
+ADMINS = [624102836, 7477828866]
+AGENT_LOG_CHANNEL = -1003484693080
+DATA_FILE = "orders.json"
 
-# ===== DATABASE SETUP =====
-def init_db():
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    # Staff table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS staff (
-            user_id INTEGER PRIMARY KEY,
-            full_name TEXT
-        )
-    """)
-    # Attendance table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS attendance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            date TEXT,
-            clock_in TEXT,
-            clock_out TEXT,
-            status TEXT,
-            late_minutes INTEGER
-        )
-    """)
-    # Broken glass table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS broken_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            reported_by_id INTEGER,
-            reported_by_name TEXT,
-            broken_by TEXT,
-            photo_file_id TEXT,
-            date TEXT,
-            time TEXT,
-            message_link TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+STATUS_MAP = {
+    "out": "Out for delivery",
+    "otw": "On the way to Hulhumale'",
+    "got": "Received by Hulhumale' agents",
+    "air": "On the way to airport",
+    "done": "Order delivery completed",
+    "no": "No answer from the number",
+}
 
-# ===== HELPER FUNCTIONS =====
-def escape_markdown(text: str) -> str:
-    return re.sub(r'([_\*\[\]\(\)\~\>\#\+\-\=\|\{\}\.\!])', r'\\\1', text)
+ORDER_PATTERN = re.compile(r"^(?P<orders>[0-9 ,]+)\s+(?P<status>[a-zA-Z]+)$", re.IGNORECASE)
 
-def gmt5_now() -> datetime:
-    return datetime.now(timezone(timedelta(hours=5)))
+# ----------------------------
+# JSON STORAGE
+# ----------------------------
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        save_data({})
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
 
-def get_shift(clock_time: datetime) -> str:
-    h = clock_time.hour
-    if h < 17:
-        return "Morning"
-    return "Evening"
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-def compute_late(clock_time: datetime, shift: str) -> int:
-    if shift == "Morning":
-        ref = clock_time.replace(hour=8, minute=30)
-    else:
-        ref = clock_time.replace(hour=17, minute=0)
-    delta = clock_time - ref
-    return max(0, int(delta.total_seconds() // 60))
+def now_gmt5():
+    return datetime.now(timezone.utc) + timedelta(hours=5)
 
-async def delete_after(msg, delay_s: int):
-    await asyncio.sleep(delay_s)
+# ----------------------------
+# HELPER FUNCTIONS
+# ----------------------------
+async def send_agent_log(context: ContextTypes.DEFAULT_TYPE, orders, agent_name, status_full, action="Update", user_id=None):
+    orders_text = ", ".join(orders)
+    agent_html = f'<a href="tg://user?id={user_id}">{agent_name}</a>' if user_id else agent_name
+    message = (
+        f"<b>#{action}</b>\n"
+        f"• Orders#: {orders_text}\n"
+        f"• Agent: {agent_html}\n"
+        f"• Time: {now_gmt5().strftime('%H:%M')} ⏰\n"
+        f"• Status: {status_full}"
+    )
+    await context.bot.send_message(
+        chat_id=AGENT_LOG_CHANNEL,
+        text=message,
+        parse_mode="HTML"
+    )
+
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, orders, agent_name):
+    msg = f"⚠️ Order(s) {', '.join(orders)} marked as NO ANSWER by {agent_name}"
+    for admin in ADMINS:
+        try:
+            await context.bot.send_message(chat_id=admin, text=msg)
+        except:
+            pass
+
+# ----------------------------
+# URGENT HANDLERS
+# ----------------------------
+async def urgent_private_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != "private":
+        return
+
+    user_id = update.message.from_user.id
+    text = update.message.text.lower()
+
+    if "urgent" not in text:
+        return
+
+    if user_id not in ADMINS:
+        return await update.message.reply_text("❌ Only admins can send urgent alerts.")
+
+    numbers = re.findall(r"\b\d+\b", text)
+    if not numbers:
+        return await update.message.reply_text("❌ No order numbers found.")
+
+    urgent_text = f"🚨 URGENT ORDERS: {', '.join(numbers)}"
+
+    msg = await context.bot.send_message(
+        chat_id=GROUP_ID,
+        text=urgent_text
+    )
+
     try:
-        await msg.delete()
+        await context.bot.pin_chat_message(chat_id=GROUP_ID, message_id=msg.message_id)
     except:
         pass
 
-# ===== STAFF MANAGEMENT =====
-async def add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message.reply_to_message or len(context.args) < 1:
-        await message.reply_text("Reply to a user and provide their correct name. Usage: /add <Name>")
-        return
-    user = message.reply_to_message.from_user
-    name = " ".join(context.args)
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO staff (user_id, full_name) VALUES (?, ?)", (user.id, name))
-    conn.commit()
-    conn.close()
-    await message.reply_text(f"✅ Staff added: {name}")
+    await update.message.reply_text("✅ Urgent message sent and pinned in group.")
 
-async def rm_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message.reply_to_message:
-        await message.reply_text("Reply to a staff to remove them using /rm")
-        return
-    user = message.reply_to_message.from_user
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("DELETE FROM staff WHERE user_id=?", (user.id,))
-    conn.commit()
-    conn.close()
-    await message.reply_text(f"✅ Staff removed: {user.full_name}")
+async def urgent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        return await update.message.reply_text("❌ Only admins can send urgent alerts.")
 
-async def list_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, full_name FROM staff")
-    rows = cur.fetchall()
-    conn.close()
-    text = f"*Staff list ({len(rows)} total):*\n"
-    for uid, name in rows:
-        text += f"• **[{escape_markdown(name)}](tg://user?id={uid})**\n"
-    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    args = update.message.text.split()
+    if len(args) < 2:
+        return await update.message.reply_text("Usage: /urgent 12345")
 
-# ===== CLOCK-IN/CLOCK-OUT =====
-async def clock_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    user = message.from_user
-    now = gmt5_now()
-    shift = get_shift(now)
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    date = now.strftime("%Y-%m-%d")
-    cur.execute("SELECT * FROM attendance WHERE user_id=? AND date=?", (user.id, date))
-    if cur.fetchone():
-        await message.reply_text("❌ You have already clocked in today.")
+    orders = [o for o in args[1:] if o.isdigit()]
+    if not orders:
+        return await update.message.reply_text("❌ No valid order numbers provided.")
+
+    urgent_text = f"🚨 URGENT ORDERS: {', '.join(orders)}"
+
+    msg = await context.bot.send_message(
+        chat_id=GROUP_ID,
+        text=urgent_text
+    )
+
+    try:
+        await context.bot.pin_chat_message(chat_id=GROUP_ID, message_id=msg.message_id)
+    except:
+        pass
+
+    await update.message.reply_text("✅ Urgent message sent and pinned in group.")
+
+# ----------------------------
+# MESSAGE HANDLERS
+# ----------------------------
+async def lookup_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text.isdigit():
         return
-    late_minutes = compute_late(now, shift)
-    # Automatic clock-out
-    if shift == "Morning":
-        clock_out = now.replace(hour=17, minute=0)
+    data = load_data()
+    oid = update.message.text.strip()
+    if oid in data:
+        info = data[oid]
+        await update.message.reply_text(
+            f"Order#: {oid}\n"
+            f"Status: {info['status']}\n"
+            f"Updated: {info['timestamp']} ⏰\n"
+            f"By: {info['agent']}"
+        )
     else:
-        clock_out = now.replace(hour=0, minute=30) + timedelta(days=1)
-    cur.execute("""
-        INSERT INTO attendance (user_id, date, clock_in, clock_out, status, late_minutes)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (user.id, date, now.strftime("%H:%M"), clock_out.strftime("%H:%M"), "Clocked In", late_minutes))
-    conn.commit()
-    conn.close()
-    # Send log to channel
-    msg_link = f"https://t.me/c/{str(GROUP_ID)[4:]}/{message.message_id}"
-    caption = f"#clock\n• Staff Name: {escape_markdown(user.full_name)}\n• Date: {date}\n• Time: {now.strftime('%H:%M')}\n• Message link: [Go to message]({msg_link})"
-    await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=caption, parse_mode=ParseMode.MARKDOWN)
-    confirm = await message.reply_text("✅ Clock-in recorded.")
-    asyncio.create_task(delete_after(confirm, 5))
+        await update.message.reply_text("❌ This order hasn't been updated yet.")
 
-# ===== SICK/OFF COMMANDS =====
-async def mark_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    user = message.from_user
-    cmd = message.text[1:]  # sick/off
-    now = gmt5_now()
-    date = now.strftime("%Y-%m-%d")
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO attendance (user_id, date, status, clock_in, clock_out, late_minutes) VALUES (?, ?, ?, ?, ?, ?)",
-                (user.id, date, cmd.capitalize(), None, None, 0))
-    conn.commit()
-    conn.close()
-    await message.reply_text(f"✅ Marked as {cmd.capitalize()} for {date}")
+async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.id != GROUP_ID or not update.message.text:
+        return
 
-# ===== SHOW ATTENDANCE =====
-async def show_staff_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if message.reply_to_message:
-        staff_id = message.reply_to_message.from_user.id
-    elif len(context.args) > 0:
-        staff_id = int(context.args[0])
+    text = update.message.text.strip()
+    agent_name = update.message.from_user.full_name
+    user_id = update.message.from_user.id
+
+    # Manual done per order
+    match_done = re.match(r"^([0-9 ,]+)\s+done$", text, re.IGNORECASE)
+    if match_done:
+        orders = [o.strip() for o in match_done.group(1).split(",") if o.strip().isdigit()]
+        if not orders: return
+        data = load_data()
+        updated = []
+
+        for oid in orders:
+            current_order = data.get(oid, {})
+            if current_order.get("status") == STATUS_MAP["done"]:
+                await update.message.reply_text(
+                    f"❌ Order {oid} has already been delivered by {current_order.get('agent','Unknown')}."
+                )
+                continue
+
+            current_order["status"] = STATUS_MAP["done"]
+            current_order["timestamp"] = now_gmt5().strftime("%H:%M")
+            current_order["agent"] = agent_name
+            current_order.setdefault("history", []).append({
+                "status": STATUS_MAP["done"],
+                "agent": agent_name,
+                "timestamp": current_order["timestamp"]
+            })
+            data[oid] = current_order
+            updated.append(oid)
+
+        save_data(data)
+
+        if updated:
+            await update.message.reply_text(
+                f"✅ Orders {', '.join(updated)} marked as done manually by {agent_name}"
+            )
+            await send_agent_log(context, updated, agent_name, STATUS_MAP["done"], action="Done", user_id=user_id)
+        return
+
+    # Standard updates
+    match = ORDER_PATTERN.match(text)
+    if not match: return
+    orders_raw = match.group("orders")
+    status_key = match.group("status").lower()
+    if status_key not in STATUS_MAP: return
+    status_full = STATUS_MAP[status_key]
+    orders = [o.strip() for o in orders_raw.split(",") if o.strip().isdigit()]
+    if not orders: return
+
+    data = load_data()
+    updated = []
+
+    for oid in orders:
+        current_order = data.get(oid, {})
+
+        # Already done
+        if current_order.get("status") == STATUS_MAP["done"]:
+            await update.message.reply_text(
+                f"❌ Order {oid} has already been delivered by {current_order.get('agent','Unknown')}."
+            )
+            continue
+
+        current_order["status"] = status_full
+        current_order["timestamp"] = now_gmt5().strftime("%H:%M")
+        current_order["agent"] = agent_name
+        history_list = current_order.get("history", [])
+        history_list.append({
+            "status": status_full,
+            "agent": agent_name,
+            "timestamp": current_order["timestamp"]
+        })
+        current_order["history"] = history_list
+        data[oid] = current_order
+        updated.append(oid)
+
+    save_data(data)
+
+    if status_key == "no":
+        await notify_admins(context, updated, agent_name)
+
+    if updated:
+        msg = await update.message.reply_text(f"✅ Updated {len(updated)} order(s) by {agent_name}")
+        await asyncio.sleep(5)
+        try:
+            await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+        except:
+            pass
+
+        await send_agent_log(context, updated, agent_name, status_full, action="Update", user_id=user_id)
+
+# ----------------------------
+# COMMAND HANDLERS
+# ----------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send an order number to get its status.")
+
+# ----------------------------
+# MYORDERS with history (📝)
+# ----------------------------
+async def myorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user.full_name
+    data = load_data()
+    orders = [(oid, info) for oid, info in data.items() if info.get("agent") == user]
+
+    if not orders:
+        return await update.message.reply_text("You haven't updated any orders yet.")
+
+    msg_lines = [f"📝 *Orders updated by {user}:*"]
+
+    for oid, info in orders:
+        history = info.get("history", [])
+        if not history:
+            history_text = "_No history available._"
+        else:
+            history_sorted = sorted(history, key=lambda x: x["timestamp"], reverse=True)
+            history_lines = [f"  - *{h['status']}* at `{h['timestamp']}`" for h in history_sorted]
+            history_text = "\n".join(history_lines)
+
+        msg_lines.append(f"\n*Order `{oid}`* (Current: *{info['status']}* at `{info['timestamp']}`)\n{history_text}")
+
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+
+# ----------------------------
+# MYSTATS
+# ----------------------------
+async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user.full_name
+    data = load_data()
+
+    total = done = no_answer = in_progress = 0
+
+    for oid, info in data.items():
+        if info.get("agent") != user:
+            continue
+        total += 1
+        status = info.get("status", "").lower()
+        if status == STATUS_MAP["done"].lower():
+            done += 1
+        elif status == STATUS_MAP["no"].lower():
+            no_answer += 1
+        else:
+            in_progress += 1
+
+    msg = (
+        f"📊 Stats for {user}\n"
+        f"Total updated: {total}\n"
+        f"✅ Completed: {done}\n"
+        f"🚚 In progress: {in_progress}\n"
+        f"❌ No answer: {no_answer}"
+    )
+    await update.message.reply_text(msg)
+
+# ----------------------------
+# CHECK ORDER HISTORY
+# ----------------------------
+async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = update.message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await update.message.reply_text("Usage: /check 12345")
+    order_id = args[1]
+    data = load_data()
+    if order_id not in data:
+        return await update.message.reply_text("❌ Order not found.")
+    info = data[order_id]
+    msg_lines = [f"📝 *Order `{order_id}` Details:*", f"Current Status: *{info['status']}*"]
+    history = info.get("history", [])
+    if not history:
+        msg_lines.append("_No history available._")
     else:
-        await message.reply_text("Reply to staff or provide ID/username to show details")
-        return
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT full_name FROM staff WHERE user_id=?", (staff_id,))
-    row = cur.fetchone()
-    if not row:
-        await message.reply_text("Staff not found")
-        return
-    name = row[0]
-    cur.execute("SELECT status, COUNT(*) FROM attendance WHERE user_id=? GROUP BY status", (staff_id,))
-    counts = {r[0]: r[1] for r in cur.fetchall()}
-    cur.execute("SELECT SUM(late_minutes) FROM attendance WHERE user_id=?", (staff_id,))
-    late_sum = cur.fetchone()[0] or 0
-    text = f"*Attendance Summary for [{escape_markdown(name)}](tg://user?id={staff_id})*\n"
-    text += f"• Total Clocked: {counts.get('Clocked In',0)}\n"
-    text += f"• Absent: {counts.get('Absent',0)}\n"
-    text += f"• Late: {counts.get('Clocked In',0)} (Total Minutes: {late_sum})\n"
-    text += f"• Sick: {counts.get('Sick',0)}\n"
-    text += f"• Off: {counts.get('Off',0)}\n"
-    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        for h in history:
+            msg_lines.append(f"- *{h['status']}* by {h['agent']} at `{h['timestamp']}`")
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
 
-# ===== BROKEN GLASS LOG =====
-def extract_broken_by(text: str):
-    match = re.search(r"broken\s*by\s*[:\-–=•]*\s*([^\n]+)", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return None
+# ----------------------------
+# RESET ALL DATA
+# ----------------------------
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        return await update.message.reply_text("❌ Admin only.")
+    save_data({})
+    await update.message.reply_text("✅ All order history cleared.")
 
-async def report_glass(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message.photo:
-        return
-    text = message.caption or ""
-    broken_by = extract_broken_by(text)
-    if not broken_by:
-        return
-    reporter = message.from_user
-    photo = message.photo[-1].file_id
-    now = gmt5_now()
-    date = now.strftime("%Y-%m-%d")
-    time = now.strftime("%H:%M")
-    msg_link = f"https://t.me/c/{str(GROUP_ID)[4:]}/{message.message_id}"
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("INSERT INTO broken_logs (reported_by_id, reported_by_name, broken_by, photo_file_id, date, time, message_link) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (reporter.id, reporter.full_name, broken_by, photo, date, time, msg_link))
-    conn.commit()
-    conn.close()
-    caption = f"#update\n• Reported by: {escape_markdown(reporter.full_name)}\n• Broken by: {escape_markdown(broken_by)}\n• Date: {date}\n• Time: {time}\n• Message link: [Go to message]({msg_link})"
-    await context.bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=caption, parse_mode=ParseMode.MARKDOWN)
-    confirm = await message.reply_text(f"✅ Report logged for {broken_by}")
-    asyncio.create_task(delete_after(confirm, 5))
+# ----------------------------
+# UNDONE ORDER
+# ----------------------------
+async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        return await update.message.reply_text("❌ Admin only.")
+    args = update.message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await update.message.reply_text("Usage: /undone 12345")
+    order_id = args[1]
+    data = load_data()
+    if order_id not in data:
+        return await update.message.reply_text("Order not found.")
+    history = data[order_id].get("history", [])
+    last_non_done = None
+    for entry in reversed(history):
+        if entry["status"] != STATUS_MAP["done"]:
+            last_non_done = entry
+            break
+    if last_non_done:
+        data[order_id]["status"] = last_non_done["status"]
+        data[order_id]["timestamp"] = last_non_done["timestamp"]
+        data[order_id]["agent"] = last_non_done["agent"]
+    else:
+        data[order_id]["status"] = "Pending"
+        data[order_id]["timestamp"] = now_gmt5().strftime("%H:%M")
+        data[order_id]["agent"] = "Unknown"
+    save_data(data)
+    await update.message.reply_text(f"🔄 Order {order_id} status reverted.")
+    await send_agent_log(context, [order_id], update.message.from_user.full_name, data[order_id]["status"], action="Undone", user_id=update.message.from_user.id)
 
-# ===== ATTENDANCE REPORT =====
-async def attendance_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("SELECT a.date, s.full_name, a.status, a.clock_in, a.clock_out, a.late_minutes, s.user_id FROM attendance a LEFT JOIN staff s ON a.user_id=s.user_id")
-    rows = cur.fetchall()
-    conn.close()
-    if not rows:
-        await message.reply_text("No attendance data found.")
-        return
-    df = pd.DataFrame(rows, columns=["Date", "Staff Name", "Status", "Clock In", "Clock Out", "Late Minutes", "User ID"])
-    file_path = f"Attendance_Report_{gmt5_now().strftime('%Y-%m')}.xlsx"
-    df.to_excel(file_path, index=False)
-    await message.reply_document(document=open(file_path, "rb"))
+# ----------------------------
+# DONE COMMAND
+# ----------------------------
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = update.message.from_user.full_name
+    user_id = update.message.from_user.id
+    data = load_data()
+    updated = []
 
-# ===== RESET HISTORY =====
-async def reset_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect("frc_bot.db")
-    cur = conn.cursor()
-    cur.execute("DELETE FROM attendance")
-    cur.execute("DELETE FROM broken_logs")
-    conn.commit()
-    conn.close()
-    await update.message.reply_text("✅ All history cleared.")
+    for oid, info in data.items():
+        if info.get("status") == STATUS_MAP["done"] or info.get("status") == STATUS_MAP["no"]:
+            continue
+        if info.get("agent") != agent:
+            continue
+        info["status"] = STATUS_MAP["done"]
+        info["timestamp"] = now_gmt5().strftime("%H:%M")
+        info.setdefault("history", []).append({
+            "status": STATUS_MAP["done"],
+            "agent": agent,
+            "timestamp": info["timestamp"]
+        })
+        updated.append(oid)
 
-# ===== MAIN =====
+    save_data(data)
+
+    if not updated:
+        return await update.message.reply_text(
+            "No eligible orders to mark as done. Only your own orders in progress can be done."
+        )
+
+    msg = await update.message.reply_text(
+        f"✅ Marked {len(updated)} order(s) as done by {agent}"
+    )
+    await asyncio.sleep(5)
+    try:
+        await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+    except:
+        pass
+
+    await send_agent_log(context, updated, agent, STATUS_MAP["done"], action="Done", user_id=user_id)
+
+# ----------------------------
+# COMPLETED ORDERS
+# ----------------------------
+async def completed_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    completed = [(oid, info) for oid, info in data.items() if info.get("status") == STATUS_MAP["done"]]
+    if not completed:
+        return await update.message.reply_text("No completed orders yet.")
+    msg_lines = ["✅ *Completed Orders:*"]
+    for oid, info in completed:
+        last_entry = info.get("history", [])[-1] if info.get("history") else info
+        msg_lines.append(f"- Order `{oid}` by {last_entry.get('agent','Unknown')} at `{last_entry.get('timestamp','Unknown')}`")
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+
+# ----------------------------
+# ONGOING ORDERS
+# ----------------------------
+async def ongoing_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    ongoing = [(oid, info) for oid, info in data.items() if info.get("status") != STATUS_MAP["done"]]
+    if not ongoing:
+        return await update.message.reply_text("No ongoing orders.")
+    msg_lines = ["🚚 *Ongoing Orders:*"]
+    for oid, info in ongoing:
+        last_entry = info.get("history", [])[-1] if info.get("history") else info
+        msg_lines.append(f"- Order `{oid}`: {last_entry.get('status','Unknown')} by {last_entry.get('agent','Unknown')} at `{last_entry.get('timestamp','Unknown')}`")
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+
+# ----------------------------
+# STATS
+# ----------------------------
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        return await update.message.reply_text("❌ Only admins can view stats.")
+    data = load_data()
+    if not data:
+        return await update.message.reply_text("No orders recorded yet.")
+
+    total = done_count = in_progress = no_answer = 0
+    agent_stats = {}
+    for oid, info in data.items():
+        status = info.get("status", "").lower()
+        agent = info.get("agent", "Unknown")
+        agent_stats.setdefault(agent, {"total": 0, "done": 0})
+        agent_stats[agent]["total"] += 1
+        total += 1
+        if status == STATUS_MAP["done"].lower():
+            done_count += 1
+            agent_stats[agent]["done"] += 1
+        elif status == STATUS_MAP["no"].lower():
+            no_answer += 1
+        else:
+            in_progress += 1
+
+    msg_lines = [
+        "📊 *Today's Order Stats*",
+        f"Total orders updated: {total}",
+        f"✅ Completed: {done_count}",
+        f"🚚 In progress: {in_progress}",
+        f"❌ No answer: {no_answer}\n",
+        "🧑‍🤝‍🧑 *Per-Agent Stats*"
+    ]
+    for agent, stats_info in agent_stats.items():
+        msg_lines.append(f"- {agent}: {stats_info['total']} updated, ✅ {stats_info['done']} done")
+
+    await update.message.reply_text("\n".join(msg_lines), parse_mode="Markdown")
+
+# ----------------------------
+# MAIN
+# ----------------------------
 def main():
-    init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Staff management
-    app.add_handler(CommandHandler("add", add_staff))
-    app.add_handler(CommandHandler("rm", rm_staff))
-    app.add_handler(CommandHandler("staff", list_staff))
+    # Commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myorders", myorders))
+    app.add_handler(CommandHandler("mystats", mystats))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("undone", undone))
+    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("comp", completed_orders))
+    app.add_handler(CommandHandler("status", ongoing_orders))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("check", check_order))
+    app.add_handler(CommandHandler("urgent", urgent_command))
+    
+    # Messages
+    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lookup_order))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, urgent_private_handler))
 
-    # Clock-in
-    app.add_handler(CommandHandler("clock", clock_in))
-    app.add_handler(MessageHandler(filters.Regex(r"^at fr$"), clock_in))
-
-    # Sick/off
-    app.add_handler(CommandHandler("sick", mark_status))
-    app.add_handler(CommandHandler("off", mark_status))
-
-    # Show staff details
-    app.add_handler(CommandHandler("show", show_staff_detail))
-
-    # Broken glass
-    app.add_handler(MessageHandler(filters.PHOTO & filters.Chat(GROUP_ID), report_glass))
-
-    # Attendance report
-    app.add_handler(CommandHandler("report", attendance_report))
-
-    # Reset
-    app.add_handler(CommandHandler("reset", reset_history))
-
-    print("✅ FRC Bot running...")
+    print("Bot running with PTB v21+ (Python 3.13 compatible, Markdown logs)")
     app.run_polling()
 
 if __name__ == "__main__":
