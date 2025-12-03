@@ -1,10 +1,10 @@
 import json
 import os
 import re
-from datetime import datetime, timedelta, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone, time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import asyncio
 
 # ----------------------------
 # CONFIG
@@ -15,6 +15,9 @@ ADMINS = [624102836, 7477828866]
 AGENT_LOG_CHANNEL = -1003484693080
 DATA_FILE = "orders.json"
 AGENTS_FILE = "agents.json"
+
+# Auto-delete confirmation messages after this many seconds
+AUTO_DELETE_SECONDS = 10
 
 # ----------------------------
 # STATUS MAP (w/ aliases)
@@ -92,6 +95,36 @@ def now_gmt5():
 
 
 # ----------------------------
+# AUTO-DELETE / TEMP MESSAGES
+# ----------------------------
+async def _schedule_delete(bot, chat_id, message_id, delay_seconds):
+    await asyncio.sleep(delay_seconds)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except:
+        pass
+
+async def send_temporary_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, timeout: int = AUTO_DELETE_SECONDS, parse_mode=None):
+    """
+    Send a reply to the incoming message and schedule it for deletion.
+    """
+    if not update.message:
+        return None
+    msg = await update.message.reply_text(text, parse_mode=parse_mode)
+    # schedule deletion
+    asyncio.create_task(_schedule_delete(context.bot, msg.chat_id, msg.message_id, timeout))
+    return msg
+
+async def send_temporary_message_by_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, timeout: int = AUTO_DELETE_SECONDS, parse_mode=None, reply_to_message_id=None):
+    """
+    Send a temporary message to a chat (useful when update is not available)
+    """
+    msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_to_message_id=reply_to_message_id)
+    asyncio.create_task(_schedule_delete(context.bot, msg.chat_id, msg.message_id, timeout))
+    return msg
+
+
+# ----------------------------
 # LOGGING HELPERS
 # ----------------------------
 async def send_agent_log(context, orders, agent_name, status_full, action="Update", user_id=None):
@@ -132,12 +165,12 @@ async def urgent_private_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Admin only.")
+        return await send_temporary_reply(update, context, "❌ Admin only.")
 
     numbers = [n for n in re.findall(r"\b\d+\b", text) if len(n) <= 6]
 
     if not numbers:
-        return await update.message.reply_text("❌ No valid numbers found.")
+        return await send_temporary_reply(update, context, "❌ No valid numbers found.")
 
     urgent_text = f"🚨 URGENT ORDERS: {', '.join(numbers)}"
     msg = await context.bot.send_message(chat_id=GROUP_ID, text=urgent_text)
@@ -146,7 +179,7 @@ async def urgent_private_handler(update: Update, context: ContextTypes.DEFAULT_T
     except:
         pass
 
-    await update.message.reply_text("✅ Urgent pinned.")
+    await send_temporary_reply(update, context, "✅ Urgent pinned.")
 
 
 # ----------------------------
@@ -154,13 +187,13 @@ async def urgent_private_handler(update: Update, context: ContextTypes.DEFAULT_T
 # ----------------------------
 async def urgent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Admin only.")
+        return await send_temporary_reply(update, context, "❌ Admin only.")
 
     args = update.message.text.split()[1:]
     orders = [o for o in args if o.isdigit() and len(o) <= 6]
 
     if not orders:
-        return await update.message.reply_text("❌ No valid order numbers.")
+        return await send_temporary_reply(update, context, "❌ No valid order numbers.")
 
     urgent_text = f"🚨 URGENT ORDERS: {', '.join(orders)}"
     msg = await context.bot.send_message(chat_id=GROUP_ID, text=urgent_text)
@@ -170,7 +203,7 @@ async def urgent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    await update.message.reply_text("✅ Urgent pinned.")
+    await send_temporary_reply(update, context, "✅ Urgent pinned.")
 
 
 # ----------------------------
@@ -264,7 +297,7 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_data(data)
 
                 if updated:
-                    await update.message.reply_text(f"🔁 Updated orders {', '.join(updated)} via reply.")
+                    await send_temporary_reply(update, context, f"🔁 Updated orders {', '.join(updated)} via reply.")
                     await send_agent_log(context, updated, agent_name, status_full, action="Reply-Update", user_id=user_id)
 
                 return
@@ -305,7 +338,7 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data)
 
         if updated:
-            await update.message.reply_text(f"🚚 Marked {', '.join(updated)} as Out.")
+            await send_temporary_reply(update, context, f"🚚 Marked {', '.join(updated)} as Out.")
             await send_agent_log(context, updated, agent_name, status_full, action="Update", user_id=user_id)
 
         return
@@ -343,7 +376,7 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data)
 
         if updated:
-            await update.message.reply_text(f"✅ Marked {', '.join(updated)} done.")
+            await send_temporary_reply(update, context, f"✅ Marked {', '.join(updated)} done.")
             await send_agent_log(context, updated, agent_name, STATUS_MAP["done"], action="Done", user_id=user_id)
 
         return
@@ -393,7 +426,7 @@ async def group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_admins(context, updated, agent_name)
 
     if updated:
-        await update.message.reply_text(f"✅ Updated {len(updated)} order(s).")
+        await send_temporary_reply(update, context, f"✅ Updated {len(updated)} order(s).")
         await send_agent_log(context, updated, agent_name, status_full, action="Update", user_id=user_id)
 
 
@@ -482,13 +515,13 @@ async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split()
 
     if len(args) != 2 or not args[1].isdigit() or len(args[1]) == 7:
-        return await update.message.reply_text("Usage: /check 12345")
+        return await send_temporary_reply(update, context, "Usage: /check 12345")
 
     order_id = args[1]
     data = load_data()
 
     if order_id not in data:
-        return await update.message.reply_text("❌ Order not found.")
+        return await send_temporary_reply(update, context, "❌ Order not found.")
 
     info = data[order_id]
     msg = [
@@ -507,12 +540,12 @@ async def check_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Admin only.")
+        return await send_temporary_reply(update, context, "❌ Admin only.")
 
     save_data({})
     save_agents({})
 
-    await update.message.reply_text("🗑 All data cleared.")
+    await send_temporary_reply(update, context, "🗑 All data cleared.")
 
 
 # ----------------------------
@@ -520,17 +553,17 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Admin only.")
+        return await send_temporary_reply(update, context, "❌ Admin only.")
 
     args = update.message.text.split()
     if len(args) != 2 or not args[1].isdigit():
-        return await update.message.reply_text("Usage: /undone 12345")
+        return await send_temporary_reply(update, context, "Usage: /undone 12345")
 
     oid = args[1]
     data = load_data()
 
     if oid not in data:
-        return await update.message.reply_text("Order not found.")
+        return await send_temporary_reply(update, context, "Order not found.")
 
     history = data[oid].get("history", [])
     last = None
@@ -550,7 +583,7 @@ async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data[oid]["agent"] = "Unknown"
 
     save_data(data)
-    await update.message.reply_text(f"🔄 Order {oid} reverted.")
+    await send_temporary_reply(update, context, f"🔄 Order {oid} reverted.")
 
 
 # ----------------------------
@@ -582,9 +615,9 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(data)
 
     if not updated:
-        return await update.message.reply_text("No orders eligible for done.")
+        return await send_temporary_reply(update, context, "No orders eligible for done.")
 
-    await update.message.reply_text(f"✅ Marked {len(updated)} orders done.")
+    await send_temporary_reply(update, context, f"✅ Marked {len(updated)} orders done.")
     await send_agent_log(context, updated, agent, STATUS_MAP["done"], action="Done", user_id=user_id)
 
 
@@ -629,12 +662,12 @@ async def ongoing_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMINS:
-        return await update.message.reply_text("❌ Admin only.")
+        return await send_temporary_reply(update, context, "❌ Admin only.")
 
     data = load_data()
 
     if not data:
-        return await update.message.reply_text("No orders yet.")
+        return await send_temporary_reply(update, context, "No orders yet.")
 
     total = done = no_ans = in_prog = 0
     agent_stats = {}
@@ -671,6 +704,63 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ----------------------------
+# DAILY SUMMARY + RESET
+# ----------------------------
+async def daily_summary(context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+
+    if not data:
+        await context.bot.send_message(
+            chat_id=AGENT_LOG_CHANNEL,
+            text="📊 Daily Summary (No orders today)."
+        )
+        # still clear to be safe
+        save_data({})
+        return
+
+    total = done = no_ans = in_prog = 0
+    agent_stats = {}
+
+    for oid, info in data.items():
+        status = info.get("status", "").lower()
+        agent = info.get("agent", "Unknown")
+
+        agent_stats.setdefault(agent, {"total": 0, "done": 0})
+        agent_stats[agent]["total"] += 1
+        total += 1
+
+        if status == STATUS_MAP["done"].lower():
+            agent_stats[agent]["done"] += 1
+            done += 1
+        elif status == STATUS_MAP["no"].lower():
+            no_ans += 1
+        else:
+            in_prog += 1
+
+    # Build summary message
+    msg = [
+        "📊 <b>Daily Summary</b>",
+        f"Total updated: {total}",
+        f"✅ Done: {done}",
+        f"🚚 In progress: {in_prog}",
+        f"❌ No answer: {no_ans}",
+        "\n<b>🧍 Agent Breakdown:</b>"
+    ]
+
+    for agent, s in agent_stats.items():
+        msg.append(f"- {agent}: {s['total']} updated, {s['done']} done")
+
+    await context.bot.send_message(
+        chat_id=AGENT_LOG_CHANNEL,
+        text="\n".join(msg),
+        parse_mode="HTML"
+    )
+
+    # Finally reset the data
+    save_data({})
+
+
+# ----------------------------
 # MAIN
 # ----------------------------
 def main():
@@ -694,6 +784,10 @@ def main():
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT, group_listener))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lookup_order))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, urgent_private_handler))
+
+    # DAILY RESET AT 06:00 GMT+5 => 01:00 UTC
+    job_queue = app.job_queue
+    job_queue.run_daily(daily_summary, time=time(hour=1, minute=0, tzinfo=timezone.utc))
 
     print("Bot running...")
     app.run_polling(drop_pending_updates=True)
